@@ -37,6 +37,7 @@ End-to-end agent loop — a single user on a single tenant can ask a natural-lan
 | WebSocket API | FastAPI with streaming events (`user_message` → `agent_chunk` / `tool_call` / `tool_result` / `agent_complete`) |
 | `SandboxManager` | `PythonSubprocessSandbox` backend with resource limits |
 | `DatabaseRegistry` | ClickHouse connector; single alias (`ch-equities`) |
+| MCP Integration | `langchain-mcp-adapters` wired into orchestrator; config loader; test MCP server; tool merging with skill `allowed_tools` |
 | Reference skills | `common/db-query`, `equities/zscore-monitor` |
 | End-to-end test | "Show me z-scores for AAPL volume" → table + chart |
 
@@ -55,6 +56,7 @@ End-to-end agent loop — a single user on a single tenant can ask a natural-lan
 | LLM provider | OpenAI GPT-5 via `langchain-openai` | Single provider, no fallback in Phase 1 |
 | TenantContext | Hardcoded stub (`equities`) | No auth/multi-tenancy in Phase 1 |
 | `firm.stats` | Stub implementation with real math | Installable stub so sandbox code can `import firm.stats` |
+| MCP integration | `langchain-mcp-adapters` | PRD §4.4; connects LangChain tools to MCP servers; single-tenant config in Phase 1 |
 
 ---
 
@@ -113,6 +115,11 @@ deep-agent/
 │       │   ├── execute_code.py             # execute_code tool (wraps SandboxManager)
 │       │   └── query_database.py           # query_database tool (wraps DatabaseRegistry)
 │       │
+│       ├── mcp/                            # MCP adapter integration
+│       │   ├── __init__.py
+│       │   ├── config.py                   # MCP JSON config loader
+│       │   └── manager.py                  # MCPManager: connect, discover tools, lifecycle
+│       │
 │       ├── orchestrator/                   # Ties everything together
 │       │   ├── __init__.py
 │       │   └── agent_orchestrator.py       # Build prompt, match skills, run agent
@@ -131,6 +138,15 @@ deep-agent/
 │       └── zscore-monitor/
 │           └── SKILL.md
 │
+├── config/                                 # Tenant configuration files
+│   └── tenants/
+│       └── equities/
+│           └── mcp.json                    # MCP server config for equities tenant
+│
+├── tests_mcp/                              # Test MCP server (echo/calculator)
+│   ├── __init__.py
+│   └── echo_server.py                      # Simple MCP server for integration testing
+│
 ├── stubs/                                  # Stub libraries for Phase 1
 │   └── firm/
 │       ├── __init__.py
@@ -146,11 +162,13 @@ deep-agent/
 │   │   ├── test_llm_router.py
 │   │   ├── test_sandbox.py
 │   │   ├── test_database_registry.py
+│   │   ├── test_mcp_config.py
 │   │   └── test_orchestrator.py
 │   ├── integration/
 │   │   ├── __init__.py
 │   │   ├── test_ws_chat.py
-│   │   └── test_langgraph_adapter.py
+│   │   ├── test_langgraph_adapter.py
+│   │   └── test_mcp_manager.py
 │   └── e2e/
 │       ├── __init__.py
 │       └── test_zscore_e2e.py
@@ -166,7 +184,8 @@ deep-agent/
 - **`models/`** has zero internal dependencies — every other module imports from it without circular references.
 - **`protocol.py`** files in `runtime/` and `sandbox/` contain only the Protocol (abstract interface), keeping protocol separate from implementation.
 - **`tools/`** bridges LangChain tool layer (consumed by `deepagents` / LangGraph) with internal services (sandbox, database). Each tool is a thin wrapper.
-- **`orchestrator/`** is the glue layer the API calls. It owns the "build prompt → match skill → create agent → stream" workflow.
+- **`mcp/`** encapsulates all MCP integration behind `MCPManager`. The orchestrator depends only on `MCPManager.get_tools()` — never on `langchain-mcp-adapters` directly. This isolates MCP adapter API changes.
+- **`orchestrator/`** is the glue layer the API calls. It owns the "build prompt → match skill → discover MCP tools → merge tools → create agent → stream" workflow.
 - **`stubs/firm/`** provides a real importable `firm.stats` module with actual math (not mocks), installed into the sandbox PYTHONPATH.
 
 ---
@@ -191,12 +210,16 @@ Week 2: Core Services
   T2.5 firm.stats stubs                       ← no deps
   T2.6 Unit tests for runtime + sandbox       ← depends on T2.3, T2.4
 
-Week 3: Integration Layer
+Week 3: Integration Layer + MCP
   T3.1 DatabaseRegistry (ClickHouse)          ← depends on T1.2
   T3.2 execute_code tool                      ← depends on T2.4
   T3.3 query_database tool                    ← depends on T3.1
-  T3.4 AgentOrchestrator                      ← depends on T1.4, T2.3, T3.2, T3.3
+  T3.6 MCP config loader                      ← depends on T1.2
+  T3.7 MCPManager (adapter service)           ← depends on T3.6
+  T3.8 Test MCP server (echo/calculator)      ← no deps
+  T3.4 AgentOrchestrator                      ← depends on T1.4, T2.3, T3.2, T3.3, T3.7
   T3.5 Unit tests for tools + orchestrator    ← depends on T3.4
+  T3.9 MCP unit + integration tests           ← depends on T3.7, T3.8
 
 Week 4: API + E2E
   T4.1 FastAPI app + WebSocket endpoint       ← depends on T3.4
@@ -223,7 +246,7 @@ Week 4: API + E2E
 - `src/deep_agent/__init__.py`
 - `src/deep_agent/py.typed`
 - `src/deep_agent/config.py`
-- All `__init__.py` files for subpackages: `models`, `skills`, `runtime`, `sandbox`, `database`, `tools`, `orchestrator`, `api`
+- All `__init__.py` files for subpackages: `models`, `skills`, `runtime`, `sandbox`, `database`, `tools`, `mcp`, `orchestrator`, `api`
 - `tests/__init__.py`, `tests/conftest.py`
 - `tests/unit/__init__.py`, `tests/integration/__init__.py`, `tests/e2e/__init__.py`
 
@@ -250,6 +273,8 @@ langchain-openai>=0.2
 langchain-core>=0.3
 openai>=1.50
 clickhouse-connect>=0.7
+langchain-mcp-adapters>=0.1
+mcp>=1.0
 pydantic>=2.0
 pydantic-settings>=2.0
 python-frontmatter>=1.0
@@ -577,7 +602,7 @@ class LangGraphAdapter:
 
 ---
 
-## Week 3: Database, Tools, and Orchestrator
+## Week 3: Database, Tools, MCP, and Orchestrator
 
 ### T3.1 — DatabaseRegistry (ClickHouse)
 
@@ -643,29 +668,33 @@ class LangGraphAdapter:
 
 ### T3.4 — AgentOrchestrator
 
-**Description:** Central coordinator tying SkillEngine, LLMRouter, RuntimeAdapter, and tools together. Given a user message and tenant context: (1) discovers skills, (2) matches relevant skills, (3) builds system prompt, (4) creates agent with tools, (5) streams response.
+**Description:** Central coordinator tying SkillEngine, LLMRouter, RuntimeAdapter, MCP, and tools together. Given a user message and tenant context: (1) discovers skills, (2) matches relevant skills, (3) discovers MCP tools, (4) merges tool sets filtered by skill `allowed_tools`, (5) builds system prompt, (6) creates agent with merged tools, (7) streams response.
 
 **Files to create:**
 - `src/deep_agent/orchestrator/__init__.py`
 - `src/deep_agent/orchestrator/agent_orchestrator.py`
 
-**Dependencies:** T1.4, T2.3, T3.2, T3.3
+**Dependencies:** T1.4, T2.3, T3.2, T3.3, T3.7
 
 **Effort:** L
 
 **Acceptance criteria:**
-1. Constructor takes `SkillEngine`, `LLMRouter`, `RuntimeAdapter`, `SandboxManager`, `DatabaseRegistry`.
+1. Constructor takes `SkillEngine`, `LLMRouter`, `RuntimeAdapter`, `SandboxManager`, `DatabaseRegistry`, `MCPManager` (optional).
 2. `async def handle_message(message, context) -> AsyncIterator[AgentEvent]`:
    - Calls `skill_engine.discover(context)` for available skills.
    - Calls `skill_engine.match(message, context)` for relevant skills.
    - Yields `SkillMatchEvent` for the top match.
    - Loads matched skill body via `skill_engine.load()`.
+   - If `MCPManager` is provided, calls `mcp_manager.get_tools()` to discover MCP-provided tools.
+   - Merges built-in tools (`execute_code`, `query_database`) with MCP-discovered tools.
+   - Filters merged tool set by matched skill's `allowed_tools` list — a tool is available only if the skill permits it.
    - Builds system prompt with: base instructions, skill summaries, matched skill body, database metadata.
-   - Creates agent via `runtime.create_agent(model, tools, system_prompt)`.
+   - Creates agent via `runtime.create_agent(model, merged_tools, system_prompt)`.
    - Streams via `runtime.stream()` and yields each event.
 3. System prompt follows PRD's progressive disclosure: all skill summaries + full body of matched skills.
-4. Tools passed to agent filtered by matched skill's `allowed_tools` list.
-5. If no skills match, agent runs with base instructions and all tools.
+4. MCP tools are included in the system prompt's tool descriptions so the LLM knows they exist.
+5. If `MCPManager` is `None` or no MCP servers configured, orchestrator works with built-in tools only (graceful degradation).
+6. If no skills match, agent runs with base instructions and all tools (built-in + MCP).
 
 **System prompt template:**
 ```
@@ -710,6 +739,148 @@ You are Deep Agent, an AI assistant for the {tenant} desk.
    - `SkillMatchEvent` yielded before agent events.
    - Error handling when no skills match.
 3. All pass with mocked RuntimeAdapter (no real LLM calls).
+
+---
+
+### T3.6 — MCP Config Loader
+
+**Description:** Implement a loader that reads per-tenant MCP configuration from a JSON file at `config/tenants/{tenant_id}/mcp.json`. The config specifies MCP servers with their transport type (`stdio` or `sse`), connection details, and environment variables. Phase 1 supports a single tenant (`equities`) with a single config file.
+
+**Files to create:**
+- `src/deep_agent/mcp/__init__.py`
+- `src/deep_agent/mcp/config.py`
+- `config/tenants/equities/mcp.json` (example config for testing)
+
+**Dependencies:** T1.2
+
+**Effort:** S
+
+**Acceptance criteria:**
+1. `MCPServerConfig` Pydantic model with fields: `name: str`, `transport: Literal["stdio", "sse"]`, `command: list[str] | None` (for stdio), `url: str | None` (for SSE), `env: dict[str, str]` (optional env vars).
+2. `MCPConfig` model with `servers: list[MCPServerConfig]`.
+3. `load_mcp_config(tenant: TenantContext) -> MCPConfig` reads from `config/tenants/{tenant_id}/mcp.json`.
+4. Returns an empty `MCPConfig(servers=[])` if the config file does not exist (graceful degradation).
+5. Validates the JSON structure — raises `MCPConfigError` with a clear message on malformed input.
+6. Example `config/tenants/equities/mcp.json`:
+   ```json
+   {
+     "servers": [
+       {
+         "name": "echo-test",
+         "transport": "stdio",
+         "command": ["python", "-m", "tests_mcp.echo_server"]
+       }
+     ]
+   }
+   ```
+
+---
+
+### T3.7 — MCPManager (Adapter Service)
+
+**Description:** Implement `MCPManager` which uses `langchain-mcp-adapters` to connect to MCP servers, discover their tools, and expose them as LangChain-compatible tools. Manages the lifecycle of MCP server connections (connect on session start, disconnect on session end).
+
+**Files to create:**
+- `src/deep_agent/mcp/manager.py`
+
+**Dependencies:** T3.6
+
+**Effort:** M
+
+**Acceptance criteria:**
+1. `MCPManager.__init__(config: MCPConfig)` stores the server config.
+2. `async def connect()` establishes connections to all configured MCP servers using `langchain-mcp-adapters`:
+   - For `stdio` transport: launches the server process and connects via stdin/stdout.
+   - For `sse` transport: connects to the SSE URL.
+3. `async def get_tools() -> list[Tool]` returns all LangChain `BaseTool` instances discovered from connected MCP servers. Tools are cached after first discovery within a session.
+4. `async def disconnect()` cleanly shuts down all MCP server connections and processes.
+5. If a server fails to connect, logs a warning and continues with remaining servers (partial availability).
+6. If `langchain-mcp-adapters` is not installed, `MCPManager` logs a warning and `get_tools()` returns an empty list (graceful degradation).
+
+**Implementation approach:**
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+class MCPManager:
+    async def connect(self):
+        server_params = {}
+        for server in self.config.servers:
+            if server.transport == "stdio":
+                server_params[server.name] = {
+                    "command": server.command[0],
+                    "args": server.command[1:],
+                    "transport": "stdio",
+                    "env": server.env or {},
+                }
+            elif server.transport == "sse":
+                server_params[server.name] = {
+                    "url": server.url,
+                    "transport": "sse",
+                }
+        self._client = MultiServerMCPClient(server_params)
+        await self._client.__aenter__()
+        self._tools = self._client.get_tools()
+
+    async def get_tools(self) -> list:
+        return self._tools if self._tools else []
+
+    async def disconnect(self):
+        if self._client:
+            await self._client.__aexit__(None, None, None)
+```
+
+---
+
+### T3.8 — Test MCP Server (Echo/Calculator)
+
+**Description:** Create a simple MCP server for integration testing. The server exposes 2-3 trivial tools (e.g., `echo`, `add`, `multiply`) via the MCP protocol using the `mcp` Python SDK. This server is used only in tests — it validates that the MCPManager correctly discovers and invokes MCP-provided tools.
+
+**Files to create:**
+- `tests_mcp/__init__.py`
+- `tests_mcp/echo_server.py`
+
+**Dependencies:** None
+
+**Effort:** S
+
+**Acceptance criteria:**
+1. `echo_server.py` is a valid MCP server runnable via `python -m tests_mcp.echo_server`.
+2. Exposes tools:
+   - `echo(message: str) -> str` — returns the input message.
+   - `add(a: float, b: float) -> float` — returns `a + b`.
+   - `multiply(a: float, b: float) -> float` — returns `a * b`.
+3. Uses `stdio` transport (reads from stdin, writes to stdout).
+4. Built using the `mcp` Python SDK (`from mcp.server import Server`).
+5. Server starts, serves tool discovery and invocation requests, and exits cleanly on disconnect.
+
+---
+
+### T3.9 — MCP Unit and Integration Tests
+
+**Description:** Write tests covering MCP config loading, MCPManager lifecycle, tool discovery, and tool invocation via the test MCP server.
+
+**Files to create:**
+- `tests/unit/test_mcp_config.py`
+- `tests/integration/test_mcp_manager.py`
+
+**Dependencies:** T3.7, T3.8
+
+**Effort:** M
+
+**Acceptance criteria:**
+1. Config loader tests:
+   - Valid JSON parses to `MCPConfig` with correct server entries.
+   - Missing file returns empty config (no error).
+   - Malformed JSON raises `MCPConfigError`.
+   - Validates required fields per transport type (`command` for stdio, `url` for SSE).
+2. MCPManager integration tests (using the test echo server):
+   - `connect()` successfully starts the echo server process and discovers 3 tools.
+   - `get_tools()` returns LangChain `BaseTool` instances with correct names (`echo`, `add`, `multiply`).
+   - Invoking the `add` tool with `(2, 3)` returns `5`.
+   - `disconnect()` cleanly shuts down the server process.
+   - Graceful degradation: config with a non-existent server command logs a warning and returns partial tools.
+3. All unit tests pass with `pytest tests/unit/test_mcp_config.py`.
+4. Integration tests pass with `pytest tests/integration/test_mcp_manager.py`.
 
 ---
 
@@ -873,15 +1044,19 @@ You are Deep Agent, an AI assistant for the {tenant} desk.
 | 3 | T3.1 | DatabaseRegistry (ClickHouse) | M | T1.2 |
 | 3 | T3.2 | execute_code tool | M | T2.4 |
 | 3 | T3.3 | query_database tool | S | T3.1 |
-| 3 | T3.4 | AgentOrchestrator | L | T1.4, T2.3, T3.2, T3.3 |
+| 3 | T3.6 | MCP config loader | S | T1.2 |
+| 3 | T3.7 | MCPManager (adapter service) | M | T3.6 |
+| 3 | T3.8 | Test MCP server (echo/calculator) | S | None |
+| 3 | T3.4 | AgentOrchestrator (with MCP tool merging) | L | T1.4, T2.3, T3.2, T3.3, T3.7 |
 | 3 | T3.5 | Unit tests — tools + orchestrator | M | T3.4 |
+| 3 | T3.9 | MCP unit + integration tests | M | T3.7, T3.8 |
 | 4 | T4.1 | FastAPI app + WebSocket endpoint | L | T3.4 |
 | 4 | T4.2 | docker-compose + ClickHouse seed script | M | T3.1 |
 | 4 | T4.3 | Integration tests (WebSocket) | M | T4.1 |
 | 4 | T4.4 | E2E test — z-score query | L | T4.1, T4.2, T2.5 |
 | 4 | T4.5 | Dev run script + polish | M | All |
 
-**Effort breakdown:** 5S + 10M + 5L = ~130 engineer-hours (~3.3 FTE-weeks for one engineer, comfortable for 2 engineers over 4 weeks).
+**Effort breakdown:** 7S + 12M + 5L = ~156 engineer-hours (~3.9 FTE-weeks for one engineer, comfortable for 2 engineers over 4 weeks with parallelization).
 
 ---
 
@@ -891,7 +1066,7 @@ Within each week, tasks can be split across two engineers:
 
 - **Week 1:** T1.1 first. Then T1.2 + T1.3 in parallel. Then T1.4 + T1.5 in parallel. T1.6 after both land.
 - **Week 2:** T2.1 + T2.2 + T2.4 + T2.5 all in parallel (share only T1.2 as dep). T2.3 waits for T2.1 + T2.2.
-- **Week 3:** T3.1 starts immediately. T3.2 + T3.3 in parallel. T3.4 waits for all.
+- **Week 3:** T3.1 + T3.6 + T3.8 start immediately in parallel. T3.2 + T3.3 + T3.7 in second wave. T3.4 waits for T3.2, T3.3, T3.7. T3.5 + T3.9 can run in parallel after their deps land.
 - **Week 4:** T4.1 + T4.2 in parallel. T4.3 + T4.4 wait for T4.1.
 
 ---
@@ -905,6 +1080,8 @@ Within each week, tasks can be split across two engineers:
 | 3 | **Subprocess sandbox `resource` module Linux-only** | `RLIMIT_AS` behaves differently on macOS | Target Linux (deployment platform). Document macOS limitations in README. CI runs on Linux. |
 | 4 | **ClickHouse availability for E2E** | E2E test requires running ClickHouse | `docker-compose.yml` in T4.2. E2E tests marked `@pytest.mark.e2e` and skippable. |
 | 5 | **LLM non-determinism in E2E** | Agent may generate different code each run | Assert on structural properties (events contain tool calls, output files exist) not exact content. |
+| 6 | **`langchain-mcp-adapters` API changes** | MCP integration is relatively new; API may shift | `MCPManager` encapsulates all adapter calls. If the API changes, only `manager.py` needs updating. Test MCP server validates the integration independently. |
+| 7 | **MCP server process management** | stdio-transport servers are child processes; leaked processes on crash | `MCPManager.disconnect()` in a `finally` block. Integration tests verify clean shutdown. Subprocess timeout as safety net. |
 
 ---
 
