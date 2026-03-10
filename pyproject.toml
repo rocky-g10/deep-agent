@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deep-agent"
+version = "0.1.0"
+description = "Deep Agent framework"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Deep Agent Team" }]
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "websockets>=12.0",
+  "deepagents",
+  "langgraph>=0.2",
+  "langchain-openai>=0.2",
+  "langchain-core>=0.3",
+  "openai>=1.50",
+  "clickhouse-connect>=0.7",
+  "langchain-mcp-adapters>=0.1",
+  "mcp>=1.0",
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "python-frontmatter>=1.0",
+  "matplotlib>=3.9",
+  "plotly>=5.22",
+  "pandas>=2.2",
+  "numpy>=1.26",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = ["src"]
+strict = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["frontmatter"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
+asyncio_mode = "auto"

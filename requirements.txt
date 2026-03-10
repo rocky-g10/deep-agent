@@ -1,35 +1,18 @@
-# Deep Agent — Phase 1 Production Dependencies
-
-# Agent framework (primary: deepagents, fallback: langgraph)
-deepagents>=0.1
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=12.0
+deepagents
 langgraph>=0.2
 langchain-openai>=0.2
 langchain-core>=0.3
 openai>=1.50
-
-# API layer
-fastapi>=0.115
-uvicorn[standard]>=0.30
-websockets>=12.0
-
-# MCP integration
+clickhouse-connect>=0.7
 langchain-mcp-adapters>=0.1
 mcp>=1.0
-
-# Database
-clickhouse-connect>=0.7
-
-# Data & visualization
+pydantic>=2.0
+pydantic-settings>=2.0
+python-frontmatter>=1.0
 matplotlib>=3.9
 plotly>=5.22
 pandas>=2.2
 numpy>=1.26
-
-# Config & validation
-pydantic>=2.0,<3
-pydantic-settings>=2.0
-python-dotenv>=1.0
-python-frontmatter>=1.0
-
-# Skill hot reload
-watchdog>=4.0

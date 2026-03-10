@@ -1,0 +1,142 @@
+"""Skill discovery, matching, and loading engine."""
+
+from __future__ import annotations
+
+import re
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Protocol
+
+from deep_agent.models import SkillContent, SkillSummary, TenantContext
+from deep_agent.skills.parser import parse_skill_file
+
+_TOKEN_PATTERN = re.compile(r"[a-z0-9_]+")
+
+
+class Clock(Protocol):
+    """Protocol for obtaining current time in seconds."""
+
+    def __call__(self) -> float:
+        """Return current monotonic or wall-clock seconds."""
+
+
+class SkillNotFoundError(KeyError):
+    """Raised when a skill is missing or inaccessible for a tenant."""
+
+
+class SkillEngine:
+    """Loads skills from disk and exposes discovery, matching, and retrieval APIs."""
+
+    def __init__(
+        self,
+        skills_root: Path,
+        cache_ttl: int = 300,
+        parser: Callable[[Path], SkillContent] = parse_skill_file,
+        clock: Clock = time.time,
+    ) -> None:
+        """Initialize the engine with a skills root and cache TTL in seconds."""
+        self._skills_root = skills_root
+        self._cache_ttl = cache_ttl
+        self._parser = parser
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._last_scan_at = 0.0
+        self._skills_index: dict[str, SkillContent] = {}
+
+    def discover(self, tenant: TenantContext) -> list[SkillSummary]:
+        """Return skills visible to the tenant from common and tenant-specific directories."""
+        visible = self._visible_skills(tenant)
+        return [
+            SkillSummary(
+                skill_id=skill.skill_id,
+                name=skill.name,
+                description=skill.description,
+                tags=skill.tags,
+            )
+            for skill in visible
+        ]
+
+    def match(self, query: str, tenant: TenantContext, top_k: int = 5) -> list[SkillSummary]:
+        """Return top matching skills ranked by tag overlap with query tokens."""
+        visible = self._visible_skills(tenant)
+        query_tokens = _tokenize(query)
+        scored: list[tuple[float, SkillContent]] = [
+            (_score_skill(skill=skill, query_tokens=query_tokens), skill) for skill in visible
+        ]
+        scored.sort(key=lambda item: (-item[0], item[1].skill_id))
+        top = scored[:top_k] if top_k > 0 else []
+
+        return [
+            SkillSummary(
+                skill_id=skill.skill_id,
+                name=skill.name,
+                description=skill.description,
+                tags=skill.tags,
+            )
+            for _, skill in top
+        ]
+
+    def load(self, skill_id: str, tenant: TenantContext) -> SkillContent:
+        """Return full skill content for a visible skill ID."""
+        self._ensure_cache()
+        with self._lock:
+            skill = self._skills_index.get(skill_id)
+
+        if skill is None or not _is_visible_to_tenant(skill=skill, tenant=tenant):
+            raise SkillNotFoundError(
+                f"Skill '{skill_id}' not found for tenant '{tenant.tenant_id}'"
+            )
+        return skill
+
+    def _visible_skills(self, tenant: TenantContext) -> list[SkillContent]:
+        self._ensure_cache()
+        with self._lock:
+            skills = [
+                skill
+                for skill in self._skills_index.values()
+                if _is_visible_to_tenant(skill=skill, tenant=tenant)
+            ]
+        return sorted(skills, key=lambda skill: skill.skill_id)
+
+    def _ensure_cache(self) -> None:
+        if not self._needs_refresh():
+            return
+
+        # Build outside lock so concurrent reads are not blocked by filesystem I/O.
+        new_index = self._scan_filesystem()
+
+        with self._lock:
+            now = self._clock()
+            should_refresh = not self._skills_index or (now - self._last_scan_at) >= self._cache_ttl
+            if should_refresh:
+                self._skills_index = new_index
+                self._last_scan_at = now
+
+    def _needs_refresh(self) -> bool:
+        now = self._clock()
+        with self._lock:
+            return not self._skills_index or (now - self._last_scan_at) >= self._cache_ttl
+
+    def _scan_filesystem(self) -> dict[str, SkillContent]:
+        index: dict[str, SkillContent] = {}
+        for skill_file in sorted(self._skills_root.rglob("SKILL.md")):
+            skill = self._parser(skill_file)
+            index[skill.skill_id] = skill
+        return index
+
+
+def _is_visible_to_tenant(skill: SkillContent, tenant: TenantContext) -> bool:
+    return skill.tenant == "common" or skill.tenant == tenant.tenant_id
+
+
+def _tokenize(query: str) -> set[str]:
+    return set(_TOKEN_PATTERN.findall(query.lower()))
+
+
+def _score_skill(skill: SkillContent, query_tokens: set[str]) -> float:
+    if not skill.tags:
+        return 0.0
+    matched_tags = sum(1 for tag in skill.tags if _tokenize(tag).intersection(query_tokens))
+    return matched_tags / len(skill.tags)
