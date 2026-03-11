@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {
+      "name": "echo-test",
+      "transport": "stdio",
+      "command": ["python", "-m", "tests_mcp.echo_server"]
+    }
+  ]
+}
