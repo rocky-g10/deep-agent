@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 from langchain_core.tools import BaseTool
 
@@ -51,6 +52,7 @@ class AgentOrchestrator:
         message: str,
         context: TenantContext,
         skill_bindings: AgentSkillBindings,
+        history: list[Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message and stream normalized runtime events."""
         try:
@@ -76,12 +78,17 @@ class AgentOrchestrator:
                     logger.warning("Failed to load matched skill '%s': %s", top_match.skill_id, exc)
 
             llm_config = self._llm_router.resolve(context)
+            skill_timeout: int | None = None
+            if skill_content is not None and skill_content.quality.timeout != 60:
+                skill_timeout = skill_content.quality.timeout
             scripts_dirs = (
                 [skill_content.scripts_path]
                 if skill_content and skill_content.scripts_path
                 else None
             )
-            builtin_tools = self._build_builtin_tools(context, scripts_dirs=scripts_dirs)
+            builtin_tools = self._build_builtin_tools(
+                context, scripts_dirs=scripts_dirs, timeout=skill_timeout
+            )
             mcp_tools = await self._get_mcp_tools()
             all_tools = builtin_tools + self._extra_tools + mcp_tools
             if allowed_tools is not None:
@@ -101,14 +108,17 @@ class AgentOrchestrator:
                 max_tokens=llm_config.max_tokens,
             )
 
-            async for event in self._runtime.stream(agent, message, context):
+            async for event in self._runtime.stream(agent, message, context, history=history):
                 yield event
         except Exception as exc:
             logger.exception("Orchestrator error")
             yield ErrorEvent(code="ORCHESTRATOR_ERROR", message=str(exc))
 
     def _build_builtin_tools(
-        self, context: TenantContext, scripts_dirs: list[str] | None = None
+        self,
+        context: TenantContext,
+        scripts_dirs: list[str] | None = None,
+        timeout: int | None = None,
     ) -> list[BaseTool]:
         """Create built-in tools bound to tenant-scoped dependencies."""
         tools: list[BaseTool] = []
@@ -117,6 +127,7 @@ class AgentOrchestrator:
                 sandbox=self._sandbox,
                 tenant=context,
                 scripts_dirs=scripts_dirs,
+                max_timeout=timeout or 60,
             )
         )
         return tools

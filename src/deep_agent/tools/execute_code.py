@@ -18,6 +18,7 @@ def create_execute_code_tool(
     sandbox: SandboxManager,
     tenant: TenantContext,
     scripts_dirs: list[str] | None = None,
+    max_timeout: int = 60,
 ) -> BaseTool:
     """Create an execute_code tool with injected sandbox and tenant dependencies."""
     resource_env = _build_resource_env(tenant)
@@ -27,8 +28,9 @@ def create_execute_code_tool(
     @tool
     async def execute_code(code: str, timeout: int = 60) -> str:
         """Execute Python code in a sandboxed environment."""
+        capped_timeout = min(timeout, max_timeout) if max_timeout else timeout
         try:
-            result = await sandbox.execute(code=code, timeout=timeout, env=resource_env)
+            result = await sandbox.execute(code=code, timeout=capped_timeout, env=resource_env)
             return json.dumps(
                 {
                     "exit_code": result.exit_code,

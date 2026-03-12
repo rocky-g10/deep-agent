@@ -12,7 +12,14 @@ from deep_agent.models.events import (
 )
 from deep_agent.models.llm import LLMConfig
 from deep_agent.models.sandbox import ExecuteResult, ResourceLimits
-from deep_agent.models.skills import AgentSkillBindings, SkillContent, SkillMetadata, SkillSummary
+from deep_agent.models.skills import (
+    AgentSkillBindings,
+    SkillContent,
+    SkillInput,
+    SkillMetadata,
+    SkillQuality,
+    SkillSummary,
+)
 
 __all__ = [
     "AgentChunkEvent",
@@ -24,8 +31,10 @@ __all__ = [
     "LLMConfig",
     "ResourceLimits",
     "SkillContent",
+    "SkillInput",
     "SkillMatchEvent",
     "SkillMetadata",
+    "SkillQuality",
     "SkillSummary",
     "TenantContext",
     "ToolCallEvent",

@@ -317,3 +317,43 @@ async def test_skill_allowed_tools_present_after_assembly(
     tools = runtime.create_agent.call_args.kwargs["tools"]
     tool_names = {getattr(t, "name", None) for t in tools}
     assert "execute_code" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_handle_message_passes_history_to_runtime(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
+    """History should be forwarded to runtime.stream()."""
+    engine = _mock_skill_engine([])
+    runtime = MagicMock()
+    runtime.create_agent.return_value = MagicMock()
+    runtime.stream = _fake_stream
+
+    orchestrator = AgentOrchestrator(
+        skill_engine=engine,
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+    )
+
+    fake_history = [MagicMock(), MagicMock()]
+    calls = []
+
+    async def capturing_stream(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        calls.append((args, kwargs))
+        async for event in _fake_stream(*args, **kwargs):
+            yield event
+
+    runtime.stream = capturing_stream
+
+    _ = [
+        event
+        async for event in orchestrator.handle_message(
+            "follow-up", tenant_equities, skill_bindings=skill_bindings, history=fake_history
+        )
+    ]
+
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert kwargs.get("history") is fake_history

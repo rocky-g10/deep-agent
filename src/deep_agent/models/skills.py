@@ -4,7 +4,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class SkillInput(BaseModel):
+    """Declared input parameter for a skill."""
+
+    name: str
+    type: str = "string"
+    description: str = ""
+    required: bool = True
+
+
+class SkillQuality(BaseModel):
+    """Quality constraints for a skill execution."""
+
+    timeout: int = 60
+    max_retries: int = Field(default=0, alias="max-retries")
+    validation: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SkillSummary(BaseModel):
@@ -31,6 +50,8 @@ class SkillContent(SkillMetadata):
 
     body: str
     scripts_path: str = ""
+    inputs: list[SkillInput] = Field(default_factory=list)
+    quality: SkillQuality = Field(default_factory=SkillQuality)
 
 
 @dataclass(frozen=True)

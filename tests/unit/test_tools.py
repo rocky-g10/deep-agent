@@ -139,3 +139,19 @@ async def test_execute_code_tool_injects_pythonpath() -> None:
     _, kwargs = sandbox.execute.call_args
     env = kwargs.get("env", {})
     assert env["PYTHONPATH"] == "/path/to/scripts"
+
+
+@pytest.mark.asyncio
+async def test_execute_code_respects_max_timeout() -> None:
+    """max_timeout should cap the sandbox timeout."""
+    tenant = TenantContext(tenant_id="t", user_id="u")
+    sandbox = AsyncMock()
+    sandbox.execute.return_value = ExecuteResult(
+        execution_id="e", exit_code=0, stdout="", stderr="", output_files={}, duration_ms=1
+    )
+
+    tool = create_execute_code_tool(sandbox, tenant, max_timeout=30)
+    await tool.ainvoke({"code": "pass", "timeout": 90})
+
+    _, kwargs = sandbox.execute.call_args
+    assert kwargs["timeout"] <= 30

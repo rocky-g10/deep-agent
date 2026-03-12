@@ -14,7 +14,7 @@ from deep_agent.models import (
     ResourceLimits,
     TenantContext,
 )
-from deep_agent.models.skills import AgentSkillBindings
+from deep_agent.models.skills import AgentSkillBindings, SkillInput, SkillQuality
 
 
 def _roundtrip(model: Any) -> Any:
@@ -23,14 +23,14 @@ def _roundtrip(model: Any) -> Any:
     return model_type.model_validate(model.model_dump())
 
 
-def test_tenant_context_stub_returns_expected_equities_values() -> None:
-    """TenantContext.stub should return the hardcoded equities context."""
-    stub = TenantContext.stub()
+def test_tenant_context_default_returns_neutral_values() -> None:
+    """TenantContext.default should return a generic neutral context."""
+    ctx = TenantContext.default()
 
-    assert stub.tenant_id == "equities"
-    assert stub.user_id == "dev-user"
-    assert stub.mcp_config_path == "tenants/equities/mcp.json"
-    assert "ch-equities" in stub.resource_env
+    assert ctx.tenant_id == "default"
+    assert ctx.user_id == "anonymous"
+    assert ctx.resource_env == {}
+    assert ctx.mcp_config_path == ""
 
 
 def test_llm_config_roundtrip() -> None:
@@ -111,3 +111,22 @@ def test_agent_skill_bindings() -> None:
     assert "common/db-query" in bindings.bound_skill_ids
     assert "equities/zscore-monitor" in bindings.bound_skill_ids
     assert len(bindings.bound_skill_ids) == 2
+
+
+def test_skill_input_defaults() -> None:
+    inp = SkillInput(name="x")
+    assert inp.type == "string"
+    assert inp.required is True
+    assert inp.description == ""
+
+
+def test_skill_quality_defaults() -> None:
+    q = SkillQuality()
+    assert q.timeout == 60
+    assert q.max_retries == 0
+    assert q.validation == ""
+
+
+def test_skill_quality_alias() -> None:
+    q = SkillQuality(**{"max-retries": 3})
+    assert q.max_retries == 3

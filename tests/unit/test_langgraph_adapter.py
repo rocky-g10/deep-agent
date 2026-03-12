@@ -161,6 +161,36 @@ async def test_stream_error_yields_error_event(tenant_equities: TenantContext) -
 
 
 @pytest.mark.asyncio
+async def test_stream_with_history_prepends_messages(tenant_equities: TenantContext) -> None:
+    """History messages should be prepended before the new HumanMessage."""
+    captured_payloads = []
+    original_message = AIMessage(content="previous response")
+
+    async def fake_astream(payload: dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        _ = kwargs
+        captured_payloads.append(payload)
+        return
+        yield  # pragma: no cover
+
+    fake_agent = MagicMock()
+    fake_agent.astream = fake_astream
+
+    adapter = LangGraphAdapter()
+    _ = [
+        event
+        async for event in adapter.stream(
+            fake_agent, "new question", tenant_equities, history=[original_message]
+        )
+    ]
+
+    assert len(captured_payloads) == 1
+    msgs = captured_payloads[0]["messages"]
+    assert len(msgs) == 2
+    assert msgs[0] is original_message
+    assert msgs[1].content == "new question"
+
+
+@pytest.mark.asyncio
 async def test_invoke_error_returns_error_response(tenant_equities: TenantContext) -> None:
     """invoke failures should return error response payload, not raise."""
     adapter = LangGraphAdapter()

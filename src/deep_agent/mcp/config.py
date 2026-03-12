@@ -50,9 +50,7 @@ def load_mcp_config(
         config_path = (config_root / "tenants" / tenant.tenant_id / "mcp.json").resolve()
     safe_root = config_root.resolve()
     if not config_path.is_relative_to(safe_root):
-        raise MCPConfigError(
-            f"MCP config path escapes config root: path traversal detected"
-        )
+        raise MCPConfigError("MCP config path escapes config root: path traversal detected")
 
     try:
         raw_text = config_path.read_text(encoding="utf-8")

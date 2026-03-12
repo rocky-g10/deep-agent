@@ -65,10 +65,13 @@ class LangGraphAdapter(RuntimeAdapter):
         agent: Agent,
         message: str,
         context: TenantContext,
+        history: list[Any] | None = None,
     ) -> AgentResponse:
         """Run the agent and return a normalized response."""
         _ = context
-        payload = {"messages": [HumanMessage(content=message)]}
+        messages: list[Any] = list(history or [])
+        messages.append(HumanMessage(content=message))
+        payload = {"messages": messages}
         try:
             result = await agent.ainvoke(payload)
         except Exception as exc:
@@ -93,10 +96,13 @@ class LangGraphAdapter(RuntimeAdapter):
         agent: Agent,
         message: str,
         context: TenantContext,
+        history: list[Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Stream execution as normalized AgentEvent objects."""
         _ = context
-        payload = {"messages": [HumanMessage(content=message)]}
+        messages: list[Any] = list(history or [])
+        messages.append(HumanMessage(content=message))
+        payload = {"messages": messages}
         summary_parts: list[str] = []
         tokens_used = 0
         pending_tool_calls: dict[int, dict[str, str]] = {}

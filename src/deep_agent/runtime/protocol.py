@@ -39,6 +39,7 @@ class RuntimeAdapter(Protocol):
         agent: Agent,
         message: str,
         context: TenantContext,
+        history: list[Any] | None = None,
     ) -> AgentResponse:
         """Run the agent to completion and return structured output."""
         ...
@@ -48,6 +49,7 @@ class RuntimeAdapter(Protocol):
         agent: Agent,
         message: str,
         context: TenantContext,
+        history: list[Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Stream runtime events for a single request."""
         ...

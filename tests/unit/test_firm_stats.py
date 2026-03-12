@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# Add the examples skill scripts directory to sys.path so firm_stats is importable.
+# Add the canonical skill scripts directory to sys.path so firm_stats is importable.
 _scripts_dir = str(
     Path(__file__).resolve().parent.parent.parent
-    / "examples"
     / "skills"
     / "equities"
     / "zscore-monitor"

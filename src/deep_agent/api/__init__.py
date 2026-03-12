@@ -1,1 +1,1 @@
-"""Package initialization."""
+"""Deep Agent API package."""

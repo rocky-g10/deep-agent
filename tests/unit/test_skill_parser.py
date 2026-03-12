@@ -31,6 +31,83 @@ def test_parse_reference_zscore_skill() -> None:
     assert "volume" in skill.tags
 
 
+def test_parse_skill_with_inputs_and_quality(tmp_path: Path) -> None:
+    """Parser should extract inputs and quality from frontmatter."""
+    skill_path = tmp_path / "skills" / "risk" / "var" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: var-report
+description: VaR report
+version: "1.0.0"
+tags: [risk]
+allowed-tools: [execute_code]
+inputs:
+  - name: portfolio_id
+    type: string
+    description: Portfolio ID
+    required: true
+  - name: confidence
+    type: number
+    description: Confidence level
+    required: false
+quality:
+  timeout: 90
+  max-retries: 2
+  validation: "Must include VaR number"
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert len(skill.inputs) == 2
+    assert skill.inputs[0].name == "portfolio_id"
+    assert skill.inputs[0].type == "string"
+    assert skill.inputs[0].required is True
+    assert skill.inputs[1].name == "confidence"
+    assert skill.inputs[1].required is False
+    assert skill.quality.timeout == 90
+    assert skill.quality.max_retries == 2
+    assert skill.quality.validation == "Must include VaR number"
+
+
+def test_parse_skill_without_inputs_quality_uses_defaults(tmp_path: Path) -> None:
+    """Skills without inputs/quality should get empty list and default quality."""
+    skill_path = tmp_path / "skills" / "common" / "basic" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: basic
+description: basic skill
+version: "1.0.0"
+tags: [general]
+allowed-tools: [execute_code]
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert skill.inputs == []
+    assert skill.quality.timeout == 60
+    assert skill.quality.max_retries == 0
+    assert skill.quality.validation == ""
+
+
+def test_parse_reference_skills_have_inputs_and_quality() -> None:
+    """The reference zscore-monitor skill should have inputs and quality parsed."""
+    skill = parse_skill_file(Path("skills/equities/zscore-monitor/SKILL.md"))
+
+    assert len(skill.inputs) >= 1
+    assert any(i.name == "symbol" for i in skill.inputs)
+    assert skill.quality.timeout == 60
+
+
 def test_missing_required_field_raises_skill_parse_error(tmp_path: Path) -> None:
     """Parser should reject frontmatter missing required keys."""
     skill_path = tmp_path / "skills" / "equities" / "missing" / "SKILL.md"

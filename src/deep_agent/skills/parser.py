@@ -10,6 +10,7 @@ import frontmatter
 from frontmatter import Post
 
 from deep_agent.models import SkillContent
+from deep_agent.models.skills import SkillInput, SkillQuality
 
 REQUIRED_SKILL_FIELDS: tuple[str, ...] = (
     "name",
@@ -56,6 +57,27 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
     allowed_tools = _validate_string_list(
         metadata["allowed-tools"], field_name="allowed-tools", path=path
     )
+    raw_inputs = metadata.get("inputs", [])
+    inputs: list[SkillInput] = []
+    if isinstance(raw_inputs, list):
+        for item in raw_inputs:
+            if isinstance(item, dict) and "name" in item:
+                inputs.append(
+                    SkillInput(
+                        **{k: v for k, v in item.items() if k in SkillInput.model_fields}
+                    )
+                )
+
+    raw_quality = metadata.get("quality", {})
+    quality = SkillQuality()
+    if isinstance(raw_quality, dict):
+        quality = SkillQuality(
+            **{
+                k: v
+                for k, v in raw_quality.items()
+                if k in SkillQuality.model_fields or k in ("max-retries",)
+            }
+        )
 
     body = post.content or ""
     scripts_dir = path.parent / "scripts"
@@ -70,6 +92,8 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
         allowed_tools=allowed_tools,
         body=body,
         scripts_path=scripts_path,
+        inputs=inputs,
+        quality=quality,
     )
 
 
