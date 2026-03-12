@@ -25,7 +25,7 @@
 
 ## Phase 1 Goal
 
-End-to-end agent loop — a single user on a single tenant can ask a natural-language question, the agent matches a skill, queries ClickHouse, executes Python in a sandbox, and streams the answer back over WebSocket.
+End-to-end agent loop — a single user on a single tenant can ask a natural-language question, the agent matches a skill, executes Python in a sandbox (connecting to any skill-defined data source), and streams the answer back over WebSocket.
 
 **Deliverables:**
 
@@ -36,9 +36,9 @@ End-to-end agent loop — a single user on a single tenant can ask a natural-lan
 | `SkillEngine` | Discover, match (tag-based), load; hot reload from filesystem |
 | WebSocket API | FastAPI with streaming events (`user_message` → `agent_chunk` / `tool_call` / `tool_result` / `agent_complete`) |
 | `SandboxManager` | `PythonSubprocessSandbox` backend with resource limits |
-| `DatabaseRegistry` | ClickHouse connector; single alias (`ch-equities`) |
+| Resource Configuration | Generic resource env-var injection via tenant config; example: ClickHouse alias (`ch-equities`) in `examples/` |
 | MCP Integration | `langchain-mcp-adapters` wired into orchestrator; config loader; test MCP server; tool merging with skill `allowed_tools` |
-| Reference skills | `common/db-query`, `equities/zscore-monitor` |
+| Reference skills | `data-query/db-query`, `equities/zscore-monitor` (example skills in `examples/skills/`) |
 | End-to-end test | "Show me z-scores for AAPL volume" → table + chart |
 
 **NOT in Phase 1:** Auth, multi-tenancy, persistence, audit logging, standalone visualization skill.
@@ -52,10 +52,10 @@ End-to-end agent loop — a single user on a single tenant can ask a natural-lan
 | Agent framework | `deepagents` (primary), `langgraph` (fallback) | PRD specifies `deepagents`; fall back to `langgraph.prebuilt.create_react_agent` if API doesn't support clean tool override |
 | Package manager | `pip + venv` | Enterprise standard; maximum compatibility across CI and dev environments |
 | Dependency spec | `pyproject.toml` + `requirements.txt` | `pyproject.toml` for project metadata and build config; `requirements.txt` (pinned) for reproducible installs |
-| Local services | `docker-compose.yml` | ClickHouse for local dev and E2E testing |
+| Local services | `examples/docker-compose.yml` | Example data sources (ClickHouse) for local dev and E2E testing |
 | LLM provider | OpenAI GPT-5 via `langchain-openai` | Single provider, no fallback in Phase 1 |
 | TenantContext | Hardcoded stub (`equities`) | No auth/multi-tenancy in Phase 1 |
-| `firm.stats` | Stub implementation with real math | Installable stub so sandbox code can `import firm.stats` |
+| `firm_stats` | Skill-bundled script with real math | Self-contained module in `skills/equities/zscore-monitor/scripts/firm_stats.py`; sandbox code does `from firm_stats import zscore` |
 | MCP integration | `langchain-mcp-adapters` | PRD §4.4; connects LangChain tools to MCP servers; single-tenant config in Phase 1 |
 
 ---
@@ -69,7 +69,12 @@ deep-agent/
 ├── requirements-dev.txt                    # Dev/test dependencies
 ├── .gitignore
 ├── .env.example                            # Template for local env vars
-├── docker-compose.yml                      # ClickHouse for local dev
+├── examples/                               # Example skills, tools, and config
+│   ├── docker-compose.yml                  # ClickHouse for example skills
+│   ├── database/                           # Example DatabaseRegistry (not core)
+│   ├── tools/                              # Example tools (query_database)
+│   ├── skills/                             # Example skill directories
+│   └── tests/                              # Tests for example code
 ├── README.md
 ├── docs/
 │   ├── PRD.md
@@ -86,7 +91,7 @@ deep-agent/
 │       │   ├── events.py                   # AgentEvent union (agent_chunk, tool_call, etc.)
 │       │   ├── skills.py                   # SkillSummary, SkillMetadata, SkillContent
 │       │   ├── sandbox.py                  # ResourceLimits, ExecuteResult
-│       │   ├── database.py                 # DatabaseAlias, DatabaseMetadata, ConnectionConfig
+│       │   ├── database.py                 # (MOVED to examples/database/models.py)
 │       │   ├── llm.py                      # LLMConfig
 │       │   └── context.py                  # TenantContext (stub for Phase 1)
 │       │
@@ -106,14 +111,14 @@ deep-agent/
 │       │   ├── protocol.py                 # SandboxManager Protocol
 │       │   └── subprocess_sandbox.py       # PythonSubprocessSandbox
 │       │
-│       ├── database/                       # DatabaseRegistry
+│       ├── database/                       # (MOVED to examples/database/ — not core framework)
 │       │   ├── __init__.py
-│       │   └── registry.py                # DatabaseRegistry + ClickHouse config
+│       │   └── registry.py
 │       │
 │       ├── tools/                          # LangChain tool definitions
 │       │   ├── __init__.py
-│       │   ├── execute_code.py             # execute_code tool (wraps SandboxManager)
-│       │   └── query_database.py           # query_database tool (wraps DatabaseRegistry)
+│       │   ├── execute_code.py             # execute_code tool (wraps SandboxManager, resource env injection)
+│       │   └── query_database.py           # (MOVED to examples/tools/ — example tool)
 │       │
 │       ├── mcp/                            # MCP adapter integration
 │       │   ├── __init__.py
@@ -130,27 +135,32 @@ deep-agent/
 │           ├── ws_chat.py                  # WebSocket /ws/chat endpoint
 │           └── schemas.py                  # Pydantic models for WS messages
 │
-├── skills/                                 # Skill files (Markdown)
-│   ├── common/
+├── skills/                                 # Skill files (organized by domain, not tenant)
+│   ├── data-query/
 │   │   └── db-query/
-│   │       └── SKILL.md
+│   │       ├── SKILL.md
+│   │       └── scripts/
+│   │           └── requirements.txt
 │   └── equities/
 │       └── zscore-monitor/
-│           └── SKILL.md
+│           ├── SKILL.md
+│           └── scripts/
+│               ├── requirements.txt
+│               └── firm_stats.py           # Skill-bundled analytics module
 │
-├── config/                                 # Tenant configuration files
+├── config/                                 # Tenant and agent configuration
+│   ├── agents/
+│   │   └── equities-desk-agent.yaml       # Agent skill bindings
 │   └── tenants/
 │       └── equities/
-│           └── mcp.json                    # MCP server config for equities tenant
+│           ├── resources.yaml              # Resource aliases (generic env var sets)
+│           └── mcp.json                    # MCP server config
 │
 ├── tests_mcp/                              # Test MCP server (echo/calculator)
 │   ├── __init__.py
 │   └── echo_server.py                      # Simple MCP server for integration testing
 │
-├── stubs/                                  # Stub libraries for Phase 1
-│   └── firm/
-│       ├── __init__.py
-│       └── stats.py                        # zscore(), moving_avg()
+├── stubs/                                  # (REMOVED — skills bundle their own scripts per AgentSkills spec)
 │
 ├── tests/
 │   ├── __init__.py
@@ -174,8 +184,7 @@ deep-agent/
 │       └── test_zscore_e2e.py
 │
 └── scripts/
-    ├── run_dev.py                          # Launch dev server
-    └── seed_clickhouse.py                  # Seed ch-equities with sample data
+    └── run_dev.py                          # Launch dev server
 ```
 
 **Design rationale:**
@@ -183,10 +192,10 @@ deep-agent/
 - **`src/` layout** follows PEP 621; prevents accidental imports of the source tree root.
 - **`models/`** has zero internal dependencies — every other module imports from it without circular references.
 - **`protocol.py`** files in `runtime/` and `sandbox/` contain only the Protocol (abstract interface), keeping protocol separate from implementation.
-- **`tools/`** bridges LangChain tool layer (consumed by `deepagents` / LangGraph) with internal services (sandbox, database). Each tool is a thin wrapper.
+- **`tools/`** bridges LangChain tool layer (consumed by `deepagents` / LangGraph) with internal services (sandbox). Core tool: `execute_code`. Example tools (`query_database`) live in `examples/tools/`.
 - **`mcp/`** encapsulates all MCP integration behind `MCPManager`. The orchestrator depends only on `MCPManager.get_tools()` — never on `langchain-mcp-adapters` directly. This isolates MCP adapter API changes.
 - **`orchestrator/`** is the glue layer the API calls. It owns the "build prompt → match skill → discover MCP tools → merge tools → create agent → stream" workflow.
-- **`stubs/firm/`** provides a real importable `firm.stats` module with actual math (not mocks), installed into the sandbox PYTHONPATH.
+- **Skills bundle their own scripts** in `scripts/` per the Anthropic AgentSkills spec. The skill's `scripts/` directory is added to `PYTHONPATH` in the sandbox via `files_in`. No global stubs directory.
 
 ---
 
@@ -207,13 +216,13 @@ Week 2: Core Services
   T2.2 RuntimeAdapter protocol                ← depends on T1.2
   T2.3 LangGraphAdapter (deepagents)          ← depends on T2.1, T2.2
   T2.4 SandboxManager protocol + subprocess   ← depends on T1.2
-  T2.5 firm.stats stubs                       ← no deps
+  T2.5 firm_stats skill-bundled script         ← no deps
   T2.6 Unit tests for runtime + sandbox       ← depends on T2.3, T2.4
 
 Week 3: Integration Layer + MCP
-  T3.1 DatabaseRegistry (ClickHouse)          ← depends on T1.2
+  T3.1 Resource Configuration (example: DatabaseRegistry) ← depends on T1.2
   T3.2 execute_code tool                      ← depends on T2.4
-  T3.3 query_database tool                    ← depends on T3.1
+  T3.3 query_database tool (example)           ← depends on T3.1
   T3.6 MCP config loader                      ← depends on T1.2
   T3.7 MCPManager (adapter service)           ← depends on T3.6
   T3.8 Test MCP server (echo/calculator)      ← no deps
@@ -223,7 +232,7 @@ Week 3: Integration Layer + MCP
 
 Week 4: API + E2E
   T4.1 FastAPI app + WebSocket endpoint       ← depends on T3.4
-  T4.2 docker-compose + ClickHouse seed       ← depends on T3.1
+  T4.2 examples/docker-compose + seed script  ← depends on T3.1
   T4.3 Integration tests (WS)                 ← depends on T4.1
   T4.4 E2E test: z-score query                ← depends on T4.1, T4.2, T2.5
   T4.5 Dev run script + polish                ← depends on all
@@ -272,16 +281,12 @@ langgraph>=0.2
 langchain-openai>=0.2
 langchain-core>=0.3
 openai>=1.50
-clickhouse-connect>=0.7
 langchain-mcp-adapters>=0.1
 mcp>=1.0
 pydantic>=2.0
 pydantic-settings>=2.0
 python-frontmatter>=1.0
-matplotlib>=3.9
-plotly>=5.22
-pandas>=2.2
-numpy>=1.26
+pyyaml>=6.0
 ```
 
 **Key contents of `requirements-dev.txt`:**
@@ -295,7 +300,7 @@ ruff>=0.5
 mypy>=1.10
 ```
 
-**`config.py`** uses `pydantic-settings` to load from environment: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5`), `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `SKILLS_ROOT` (default `skills/`), etc.
+**`config.py`** uses `pydantic-settings` to load from environment: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5`), `SKILLS_ROOT` (default `skills/`), etc. No database-specific config — the framework is resource-agnostic. Data source credentials are configured per-tenant via resource aliases.
 
 ---
 
@@ -308,7 +313,7 @@ mypy>=1.10
 - `src/deep_agent/models/context.py` — `TenantContext`
 - `src/deep_agent/models/skills.py` — `SkillSummary`, `SkillMetadata`, `SkillContent`
 - `src/deep_agent/models/sandbox.py` — `ResourceLimits`, `ExecuteResult`
-- `src/deep_agent/models/database.py` — `DatabaseAlias`, `DatabaseMetadata`, `TableMeta`, `ConnectionConfig`
+- `src/deep_agent/models/skills.py` — also includes `AgentSkillBindings` dataclass
 - `src/deep_agent/models/llm.py` — `LLMConfig`
 - `src/deep_agent/models/events.py` — `AgentEvent` union, `AgentChunkEvent`, `ToolCallEvent`, `ToolResultEvent`, `SkillMatchEvent`, `AgentCompleteEvent`, `ErrorEvent`
 
@@ -325,20 +330,28 @@ mypy>=1.10
    class TenantContext:
        tenant_id: str
        user_id: str
-       skills_dirs: list[str]
-       db_aliases: list[str]
+       mcp_config_path: str = ""
+       resource_env: dict[str, dict[str, str]] = field(default_factory=dict)
 
        @classmethod
        def stub(cls) -> "TenantContext":
            return cls(
                tenant_id="equities",
                user_id="dev-user",
-               skills_dirs=["skills/common", "skills/equities"],
-               db_aliases=["ch-equities"],
+               mcp_config_path="config/tenants/equities/mcp.json",
+               resource_env={
+                   "ch-equities": {
+                       "DB_HOST": "localhost",
+                       "DB_PORT": "9000",
+                       "DB_USER": "default",
+                       "DB_PASS": "",
+                   }
+               },
            )
    ```
-4. `AgentEvent` is a discriminated union using Pydantic's `Discriminator` on the `type` field, matching the WebSocket protocol from PRD §4.5.
-5. `mypy` passes on all model files.
+4. `AgentSkillBindings` dataclass with `agent_id: str` and `bound_skill_ids: tuple[str, ...]`.
+5. `AgentEvent` is a discriminated union using Pydantic's `Discriminator` on the `type` field, matching the WebSocket protocol from PRD §4.5.
+6. `mypy` passes on all model files.
 
 ---
 
@@ -356,7 +369,7 @@ mypy>=1.10
 
 **Acceptance criteria:**
 1. `parse_skill_file(path: Path) -> SkillContent` correctly extracts all frontmatter fields from the reference SKILL.md examples in the PRD.
-2. Missing required fields (`name`, `description`, `version`, `tags`, `tenant`, `allowed-tools`) raise `SkillParseError` with a clear message.
+2. Missing required fields (`name`, `description`, `version`, `tags`, `allowed-tools`) raise `SkillParseError` with a clear message. Note: `tenant` is NOT a required field — skills are tenant-unaware.
 3. The `skill_id` is derived from the relative path: `skills/equities/zscore-monitor/SKILL.md` → `skill_id="equities/zscore-monitor"`.
 4. The `body` field contains the full Markdown content (everything after frontmatter).
 5. Parser handles edge cases: empty body, missing frontmatter delimiters, extra frontmatter fields (ignored gracefully).
@@ -376,9 +389,9 @@ mypy>=1.10
 
 **Acceptance criteria:**
 1. `SkillEngine(skills_root=Path("skills/"), cache_ttl=300)` scans and indexes all `SKILL.md` files on first call.
-2. `discover(tenant)` returns `SkillSummary` objects for skills in `common/` and the tenant's directory. Skills from other tenants are excluded.
-3. `match(query, tenant, top_k=5)` returns skills ranked by tag overlap with query tokens. For "z-scores for AAPL volume", the zscore-monitor skill ranks first.
-4. `load(skill_id, tenant)` returns full `SkillContent` including body. Raises `SkillNotFoundError` if skill does not exist or tenant lacks access.
+2. `discover(bindings: AgentSkillBindings)` returns `SkillSummary` objects for skills listed in `bindings.bound_skill_ids`. Skills not bound to the agent are excluded.
+3. `match(query, bindings: AgentSkillBindings, top_k=5)` returns skills ranked by tag overlap with query tokens, filtered to bound skills only. For "z-scores for AAPL volume", the zscore-monitor skill ranks first.
+4. `load(skill_id, bindings: AgentSkillBindings)` returns full `SkillContent` including body. Raises `SkillNotFoundError` if skill does not exist or is not in `bindings.bound_skill_ids`.
 5. Cache invalidation: after `cache_ttl` seconds, the next call re-scans the filesystem (hot reload).
 6. Thread-safe: cache is guarded by a lock for concurrent access.
 
@@ -395,8 +408,8 @@ Where `query_tokens` = set of lowercase words from the query. Sufficient for Pha
 **Description:** Create the two reference skill files from the PRD (§5.3.1 and §5.4). Verbatim from PRD with minor formatting cleanup.
 
 **Files to create:**
-- `skills/common/db-query/SKILL.md`
-- `skills/equities/zscore-monitor/SKILL.md`
+- `skills/data-query/db-query/SKILL.md` (with `scripts/requirements.txt`)
+- `skills/equities/zscore-monitor/SKILL.md` (with `scripts/firm_stats.py`, `scripts/requirements.txt`)
 
 **Dependencies:** T1.3 (to validate parsing)
 
@@ -404,9 +417,11 @@ Where `query_tokens` = set of lowercase words from the query. Sufficient for Pha
 
 **Acceptance criteria:**
 1. Both files parse successfully with the skill parser from T1.3.
-2. `db-query` has `tenant: common` and `skill_id: common/db-query`.
-3. `zscore-monitor` has `tenant: equities` and `skill_id: equities/zscore-monitor`.
-4. Frontmatter matches PRD spec (tags, allowed-tools, inputs, quality).
+2. `db-query` has `skill_id: data-query/db-query`. No `tenant` field in frontmatter.
+3. `zscore-monitor` has `skill_id: equities/zscore-monitor`. No `tenant` field in frontmatter.
+4. Both skills follow AgentSkills directory structure: `SKILL.md`, `scripts/`, `references/`, `assets/`.
+5. `zscore-monitor` bundles `scripts/firm_stats.py` with `zscore()` and `moving_avg()` functions.
+6. Frontmatter matches PRD spec (tags, allowed-tools, inputs, quality).
 
 ---
 
@@ -425,9 +440,9 @@ Where `query_tokens` = set of lowercase words from the query. Sufficient for Pha
 
 **Acceptance criteria:**
 1. Parser tests: valid file, missing fields, malformed frontmatter, empty body.
-2. Engine discover tests: correct filtering by tenant, includes common skills.
-3. Engine match tests: "z-scores for AAPL volume" ranks zscore-monitor first; "query database" ranks db-query first.
-4. Engine load tests: valid load, access denied for wrong tenant, skill not found.
+2. Engine discover tests: correct filtering by agent skill bindings, only bound skills returned.
+3. Engine match tests: "z-scores for AAPL volume" ranks zscore-monitor first; "query database" ranks db-query first (both bound to agent).
+4. Engine load tests: valid load, access denied for unbound skill, skill not found.
 5. Cache tests: verify hot reload after TTL expiry (mock time or use short TTL).
 6. All pass with `pytest tests/unit/`.
 
@@ -551,29 +566,29 @@ class LangGraphAdapter:
 4. Timeout produces `exit_code != 0` and stderr containing timeout info.
 5. Code that exceeds memory limit is killed with appropriate error.
 6. Code that writes to `/output/chart.png` has that file in `output_files`.
-7. The `stubs/` directory is added to `PYTHONPATH` in the subprocess environment so sandbox code can `import firm.stats`.
+7. Skill scripts provided via `files_in` are placed in the temp directory and available on `PYTHONPATH`. No global `stubs/` directory — skills bundle their own scripts per the AgentSkills spec.
 
 ---
 
-### T2.5 — firm.stats Stubs
+### T2.5 — firm_stats Skill-Bundled Script
 
-**Description:** Create a stub implementation of the `firm.stats` library with real math using pandas/numpy. Sandbox code can `import firm.stats` and get working results.
+**Description:** Create `firm_stats.py` as a self-contained module bundled inside the zscore-monitor skill's `scripts/` directory. Uses real math with pandas/numpy. Sandbox code does `from firm_stats import zscore` (the skill's scripts/ directory is on PYTHONPATH via `files_in`).
 
 **Files to create:**
-- `stubs/firm/__init__.py`
-- `stubs/firm/stats.py`
+- `skills/equities/zscore-monitor/scripts/firm_stats.py`
+- `skills/equities/zscore-monitor/scripts/requirements.txt`
 
 **Dependencies:** None
 
 **Effort:** S
 
 **Acceptance criteria:**
-1. `from firm.stats import zscore, moving_avg` works.
+1. `from firm_stats import zscore, moving_avg` works when `scripts/` is on PYTHONPATH.
 2. `moving_avg(series, window)` computes rolling mean via `pandas.Series.rolling().mean()`.
 3. `zscore(series, window)` computes `(x - rolling_mean) / rolling_std` per point.
 4. Both accept `pandas.Series` and return `pandas.Series`.
 5. Edge cases: window larger than series length returns NaN for early values.
-6. The module is usable by adding `stubs/` to `PYTHONPATH`.
+6. `scripts/requirements.txt` lists: `pandas>=2.2`, `numpy>=1.26`.
 
 ---
 
@@ -604,24 +619,26 @@ class LangGraphAdapter:
 
 ## Week 3: Database, Tools, MCP, and Orchestrator
 
-### T3.1 — DatabaseRegistry (ClickHouse)
+### T3.1 — Resource Configuration (Example: DatabaseRegistry)
 
-**Description:** Implement `DatabaseRegistry` with a single ClickHouse alias (`ch-equities`). Configuration from `config.py` / environment variables. Provides schema metadata and connection config.
+**Description:** The core framework provides generic resource env-var injection via `TenantContext.resource_env`. As an **example** (not core), implement `DatabaseRegistry` in `examples/database/` with a single ClickHouse alias (`ch-equities`). This demonstrates how skills can use resource aliases to connect to data sources.
 
 **Files to create:**
-- `src/deep_agent/database/__init__.py`
-- `src/deep_agent/database/registry.py`
+- `examples/database/__init__.py`
+- `examples/database/registry.py`
+- `examples/database/models.py` (DatabaseAlias, DatabaseMetadata, ConnectionConfig)
 
 **Dependencies:** T1.2
 
 **Effort:** M
 
 **Acceptance criteria:**
-1. `list_aliases(tenant)` returns `[DatabaseAlias(alias="ch-equities", engine="clickhouse", description="Equities fundamentals — daily OHLCV, splits, dividends")]` for the equities tenant.
-2. `get_metadata("ch-equities", tenant)` returns `DatabaseMetadata` with table `fundamentals_daily` and columns: `date Date, symbol String, open Float64, high Float64, low Float64, close Float64, volume UInt64, pe_ratio Nullable(Float64)`. Schema metadata is hardcoded in Phase 1.
-3. `get_connection("ch-equities", tenant)` returns `ConnectionConfig` with host/port/database from environment variables. `credentials_ref` points to env var names.
-4. Raises `AliasNotFoundError` for unknown aliases.
-5. Tenant scoping: only aliases registered for the given tenant are accessible.
+1. `TenantContext.resource_env` provides a generic `dict[str, dict[str, str]]` mapping resource alias → env vars. This is the core mechanism.
+2. Example `DatabaseRegistry.list_aliases(tenant)` returns `[DatabaseAlias(alias="ch-equities", ...)]` for the equities tenant.
+3. Example `DatabaseRegistry.get_metadata("ch-equities", tenant)` returns `DatabaseMetadata` with table `fundamentals_daily` and columns. Schema metadata is hardcoded in Phase 1.
+4. Example `DatabaseRegistry.get_connection("ch-equities", tenant)` returns `ConnectionConfig` reading from `TenantContext.resource_env` (not global AppSettings).
+5. Raises `AliasNotFoundError` for unknown aliases.
+6. **Important:** `DatabaseRegistry` lives in `examples/`, not `src/deep_agent/`. It is not a core framework component.
 
 ---
 
@@ -640,18 +657,18 @@ class LangGraphAdapter:
 **Acceptance criteria:**
 1. Tool defined using `@tool` decorator from `langchain_core.tools` with proper name, description, and input schema.
 2. Tool name: `execute_code`; input schema: `code: str`, optional `timeout: int`.
-3. When invoked, calls `sandbox.execute(code, timeout, env=db_env_vars)` where `db_env_vars` are injected from `DatabaseRegistry` connection config.
+3. When invoked, calls `sandbox.execute(code, timeout, env=resource_env_vars)` where `resource_env_vars` are injected from `TenantContext.resource_env` (flattened key-value pairs, filtered by `_ALLOWED_ENV_PREFIXES`).
 4. Return value includes stdout, stderr, exit_code, and base64-encoded output files.
 5. Errors (timeout, crash) returned as tool output (not raised as exceptions) so the agent can react.
 
 ---
 
-### T3.3 — query_database Tool
+### T3.3 — query_database Tool (Example)
 
-**Description:** LangChain-compatible tool providing database schema information. The agent uses this to understand tables/columns before writing code. Metadata only — no query execution.
+**Description:** Example LangChain-compatible tool providing database schema information. Lives in `examples/tools/`, not core framework. The agent uses this to understand tables/columns before writing code. Metadata only — no query execution.
 
 **Files to create:**
-- `src/deep_agent/tools/query_database.py`
+- `examples/tools/query_database.py`
 
 **Dependencies:** T3.1
 
@@ -679,22 +696,23 @@ class LangGraphAdapter:
 **Effort:** L
 
 **Acceptance criteria:**
-1. Constructor takes `SkillEngine`, `LLMRouter`, `RuntimeAdapter`, `SandboxManager`, `DatabaseRegistry`, `MCPManager` (optional).
-2. `async def handle_message(message, context) -> AsyncIterator[AgentEvent]`:
-   - Calls `skill_engine.discover(context)` for available skills.
-   - Calls `skill_engine.match(message, context)` for relevant skills.
+1. Constructor takes `SkillEngine`, `LLMRouter`, `RuntimeAdapter`, `SandboxManager`, `MCPManager` (optional), `db_registry` (optional — example code).
+2. `async def handle_message(message, context, skill_bindings: AgentSkillBindings) -> AsyncIterator[AgentEvent]`:
+   - Calls `skill_engine.discover(skill_bindings)` for available skills.
+   - Calls `skill_engine.match(message, skill_bindings)` for relevant skills.
    - Yields `SkillMatchEvent` for the top match.
    - Loads matched skill body via `skill_engine.load()`.
    - If `MCPManager` is provided, calls `mcp_manager.get_tools()` to discover MCP-provided tools.
-   - Merges built-in tools (`execute_code`, `query_database`) with MCP-discovered tools.
+   - Merges built-in tools (`execute_code`) with optional example tools (`query_database`, if `db_registry` provided) and MCP-discovered tools.
    - Filters merged tool set by matched skill's `allowed_tools` list — a tool is available only if the skill permits it.
-   - Builds system prompt with: base instructions, skill summaries, matched skill body, database metadata.
+   - Builds system prompt with: base instructions, skill summaries, matched skill body, resource metadata (from `TenantContext.resource_env`).
    - Creates agent via `runtime.create_agent(model, merged_tools, system_prompt)`.
    - Streams via `runtime.stream()` and yields each event.
 3. System prompt follows PRD's progressive disclosure: all skill summaries + full body of matched skills.
 4. MCP tools are included in the system prompt's tool descriptions so the LLM knows they exist.
 5. If `MCPManager` is `None` or no MCP servers configured, orchestrator works with built-in tools only (graceful degradation).
-6. If no skills match, agent runs with base instructions and all tools (built-in + MCP).
+6. If `db_registry` is `None`, `query_database` tool is not registered (graceful degradation).
+7. If no skills match, agent runs with base instructions and all tools (built-in + MCP).
 
 **System prompt template:**
 ```
@@ -706,14 +724,12 @@ You are Deep Agent, an AI assistant for the {tenant} desk.
 ## Active Skill: {matched_skill.name}
 {matched_skill.body}
 
-## Available Databases
-{for each alias: "- {alias} ({engine}): {description}"}
-{schema details for relevant aliases}
+## Available Resources
+{for each resource alias in TenantContext.resource_env: "- {alias}: env vars {keys}"}
 
 ## Tool Usage
-- Use `query_database` to discover schema before writing queries.
 - Use `execute_code` to run Python code in a sandboxed environment.
-- Database credentials are available as env vars: DB_HOST, DB_PORT, DB_USER, DB_PASS.
+- Resource credentials are available as env vars (e.g., DB_HOST, DB_PORT, KDB_HOST, etc.).
 - Save output files (charts, CSVs) to /output/ in your code.
 ```
 
@@ -732,10 +748,12 @@ You are Deep Agent, an AI assistant for the {tenant} desk.
 **Effort:** M
 
 **Acceptance criteria:**
-1. DatabaseRegistry tests: list aliases, get metadata, get connection, alias not found, tenant scoping.
+1. DatabaseRegistry tests (in `examples/tests/`): list aliases, get metadata, get connection, alias not found, tenant scoping.
 2. Orchestrator tests (with mocked dependencies):
    - System prompt contains skill summaries and matched skill body.
    - Tools are filtered by matched skill's `allowed_tools`.
+   - Orchestrator works without `db_registry` (graceful degradation).
+   - Skill discovery uses `AgentSkillBindings`, not tenant context.
    - `SkillMatchEvent` yielded before agent events.
    - Error handling when no skills match.
 3. All pass with mocked RuntimeAdapter (no real LLM calls).
@@ -919,27 +937,27 @@ class MCPManager:
 
 ---
 
-### T4.2 — Docker Compose + ClickHouse Seed Script
+### T4.2 — Docker Compose + ClickHouse Seed Script (Example)
 
-**Description:** Create `docker-compose.yml` for local ClickHouse and a seed script that populates sample `fundamentals_daily` data for `ch-equities`.
+**Description:** Create `examples/docker-compose.yml` for local ClickHouse and a seed script that populates sample `fundamentals_daily` data for `ch-equities`. These are example infrastructure — not core framework.
 
 **Files to create:**
-- `docker-compose.yml`
-- `scripts/seed_clickhouse.py`
+- `examples/docker-compose.yml`
+- `examples/scripts/seed_clickhouse.py`
 
 **Dependencies:** T3.1
 
 **Effort:** M
 
 **Acceptance criteria:**
-1. `docker-compose.yml` defines a ClickHouse service on port 8123 (HTTP) / 9000 (native), with a volume for data persistence.
-2. `docker compose up -d` starts ClickHouse and it accepts connections.
+1. `examples/docker-compose.yml` defines a ClickHouse service on port 8123 (HTTP) / 9000 (native), with a volume for data persistence.
+2. `docker compose -f examples/docker-compose.yml up -d` starts ClickHouse and it accepts connections.
 3. Seed script connects via env vars (`CLICKHOUSE_HOST`, etc.).
 4. Creates `fundamentals_daily` table if not exists with schema: `date Date, symbol String, open Float64, high Float64, low Float64, close Float64, volume UInt64, pe_ratio Nullable(Float64)`.
 5. Inserts 180 days of synthetic OHLCV data for AAPL (and optionally MSFT, GOOG) using seeded random walks for reproducibility.
 6. Volume data includes deliberate outliers (z-score > 2) so zscore-monitor can find them.
 7. Script is idempotent (safe to re-run).
-8. Runs with `python scripts/seed_clickhouse.py`.
+8. Runs with `python examples/scripts/seed_clickhouse.py`.
 
 ---
 
@@ -968,7 +986,7 @@ class MCPManager:
 
 ### T4.4 — End-to-End Test: Z-Score Query
 
-**Description:** Capstone deliverable proving the full pipeline. User asks "Show me z-scores for AAPL volume" via WebSocket → agent matches zscore-monitor skill → queries ClickHouse → executes Python with `firm.stats` in sandbox → returns table + chart.
+**Description:** Capstone deliverable proving the full pipeline. User asks "Show me z-scores for AAPL volume" via WebSocket → agent matches zscore-monitor skill → executes Python with `firm_stats` (skill-bundled script) in sandbox → connects to ClickHouse via resource env vars → returns table + chart.
 
 **Files to create:**
 - `tests/e2e/__init__.py`
@@ -1014,8 +1032,8 @@ class MCPManager:
    - Starts uvicorn with hot reload.
    - Prints connection info (`ws://localhost:8000/ws/chat`).
 2. `README.md` includes:
-   - Prerequisites (Python 3.12, Docker, ClickHouse).
-   - Setup steps (`python -m venv .venv`, `pip install`, env vars, seed script).
+   - Prerequisites (Python 3.12, Docker optional for examples).
+   - Setup steps (`python -m venv .venv`, `pip install`, env vars, example seed script).
    - How to run the dev server.
    - How to run tests (unit, integration, e2e).
    - Architecture overview referencing the PRD.
@@ -1039,11 +1057,11 @@ class MCPManager:
 | 2 | T2.2 | RuntimeAdapter protocol | S | T1.2 |
 | 2 | T2.3 | LangGraphAdapter (deepagents + langgraph fallback) | L | T2.1, T2.2 |
 | 2 | T2.4 | SandboxManager protocol + PythonSubprocessSandbox | L | T1.2 |
-| 2 | T2.5 | firm.stats stubs | S | None |
+| 2 | T2.5 | firm_stats skill-bundled script | S | None |
 | 2 | T2.6 | Unit tests — runtime + sandbox | M | T2.3, T2.4 |
-| 3 | T3.1 | DatabaseRegistry (ClickHouse) | M | T1.2 |
+| 3 | T3.1 | Resource Configuration (example: DatabaseRegistry) | M | T1.2 |
 | 3 | T3.2 | execute_code tool | M | T2.4 |
-| 3 | T3.3 | query_database tool | S | T3.1 |
+| 3 | T3.3 | query_database tool (example) | S | T3.1 |
 | 3 | T3.6 | MCP config loader | S | T1.2 |
 | 3 | T3.7 | MCPManager (adapter service) | M | T3.6 |
 | 3 | T3.8 | Test MCP server (echo/calculator) | S | None |
@@ -1051,7 +1069,7 @@ class MCPManager:
 | 3 | T3.5 | Unit tests — tools + orchestrator | M | T3.4 |
 | 3 | T3.9 | MCP unit + integration tests | M | T3.7, T3.8 |
 | 4 | T4.1 | FastAPI app + WebSocket endpoint | L | T3.4 |
-| 4 | T4.2 | docker-compose + ClickHouse seed script | M | T3.1 |
+| 4 | T4.2 | examples/docker-compose + ClickHouse seed (example) | M | T3.1 |
 | 4 | T4.3 | Integration tests (WebSocket) | M | T4.1 |
 | 4 | T4.4 | E2E test — z-score query | L | T4.1, T4.2, T2.5 |
 | 4 | T4.5 | Dev run script + polish | M | All |
@@ -1078,7 +1096,7 @@ Within each week, tasks can be split across two engineers:
 | 1 | **`deepagents` API instability or limited tool override** | Blocks agent creation with custom tools | `RuntimeAdapter` insulates us. Fallback to `langgraph.prebuilt.create_react_agent` is built into T2.3. Both produce a compiled graph with `.astream()`. |
 | 2 | **Streaming event mapping** | LangGraph stream modes may not map 1:1 to PRD event types | `LangGraphAdapter.stream()` owns the translation. Budget time in T2.3 to experiment with `stream_mode` options. |
 | 3 | **Subprocess sandbox `resource` module Linux-only** | `RLIMIT_AS` behaves differently on macOS | Target Linux (deployment platform). Document macOS limitations in README. CI runs on Linux. |
-| 4 | **ClickHouse availability for E2E** | E2E test requires running ClickHouse | `docker-compose.yml` in T4.2. E2E tests marked `@pytest.mark.e2e` and skippable. |
+| 4 | **ClickHouse availability for E2E** | E2E test requires running ClickHouse | `examples/docker-compose.yml` in T4.2. E2E tests marked `@pytest.mark.e2e` and skippable. ClickHouse is example infrastructure, not core. |
 | 5 | **LLM non-determinism in E2E** | Agent may generate different code each run | Assert on structural properties (events contain tool calls, output files exist) not exact content. |
 | 6 | **`langchain-mcp-adapters` API changes** | MCP integration is relatively new; API may shift | `MCPManager` encapsulates all adapter calls. If the API changes, only `manager.py` needs updating. Test MCP server validates the integration independently. |
 | 7 | **MCP server process management** | stdio-transport servers are child processes; leaked processes on crash | `MCPManager.disconnect()` in a `finally` block. Integration tests verify clean shutdown. Subprocess timeout as safety net. |
