@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from langchain_core.tools import BaseTool, tool
 
@@ -16,9 +17,12 @@ logger = logging.getLogger(__name__)
 def create_execute_code_tool(
     sandbox: SandboxManager,
     tenant: TenantContext,
+    scripts_dirs: list[str] | None = None,
 ) -> BaseTool:
     """Create an execute_code tool with injected sandbox and tenant dependencies."""
     resource_env = _build_resource_env(tenant)
+    if scripts_dirs:
+        resource_env["PYTHONPATH"] = os.pathsep.join(scripts_dirs)
 
     @tool
     async def execute_code(code: str, timeout: int = 60) -> str:
@@ -51,14 +55,40 @@ def create_execute_code_tool(
 
 
 def _build_resource_env(tenant: TenantContext) -> dict[str, str]:
-    """Flatten tenant resource aliases into a single env var dict."""
+    """Flatten tenant resource aliases into a single env var dict.
+
+    Always emits prefixed keys (e.g. CH_EQUITIES_DB_HOST).
+    Emits unprefixed keys only when there is exactly one alias.
+    Logs a warning if multiple aliases would collide on unprefixed keys.
+    """
     env: dict[str, str] = {}
-    for alias_name, alias_vars in tenant.resource_env.items():
-        for key, value in alias_vars.items():
-            env[key] = value
-        # Also set prefixed vars for multi-resource disambiguation
+    aliases = tenant.resource_env
+
+    # Always emit prefixed keys
+    for alias_name, alias_vars in aliases.items():
         prefix = alias_name.upper().replace("-", "_")
         for key, value in alias_vars.items():
-            prefixed_key = f"{prefix}_{key}"
-            env[prefixed_key] = value
+            env[f"{prefix}_{key}"] = value
+
+    # Emit unprefixed convenience keys only for single-alias tenants
+    if len(aliases) == 1:
+        alias_vars = next(iter(aliases.values()))
+        for key, value in alias_vars.items():
+            env[key] = value
+    elif len(aliases) > 1:
+        # Check for collisions and warn
+        seen: dict[str, str] = {}
+        for alias_name, alias_vars in aliases.items():
+            for key in alias_vars:
+                if key in seen:
+                    logger.warning(
+                        "Resource env collision: key '%s' appears in aliases '%s' and '%s'; "
+                        "only prefixed keys emitted",
+                        key,
+                        seen[key],
+                        alias_name,
+                    )
+                else:
+                    seen[key] = alias_name
+
     return env

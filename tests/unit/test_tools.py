@@ -74,11 +74,68 @@ async def test_execute_code_tool_injects_resource_env(tenant_equities: TenantCon
 
     _, kwargs = sandbox.execute.call_args
     env = kwargs.get("env", {})
-    # Direct env vars from resource_env
+    # Single alias: both unprefixed and prefixed should be present
     assert env["DB_HOST"] == "localhost"
     assert env["DB_PORT"] == "8123"
     assert env["DB_NAME"] == "default"
-    # Prefixed env vars for multi-resource disambiguation
     assert env["CH_EQUITIES_DB_HOST"] == "localhost"
     assert env["CH_EQUITIES_DB_PORT"] == "8123"
     assert env["CH_EQUITIES_DB_NAME"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_resource_env_multi_alias_only_prefixed() -> None:
+    """Multi-alias tenants should only get prefixed env vars (no collision)."""
+    tenant = TenantContext(
+        tenant_id="multi",
+        user_id="test-user",
+        resource_env={
+            "prod-db": {"DB_HOST": "prod.host", "DB_PORT": "5432"},
+            "dev-db": {"DB_HOST": "dev.host", "DB_PORT": "5433"},
+        },
+    )
+    sandbox = AsyncMock()
+    sandbox.execute.return_value = ExecuteResult(
+        execution_id="exec-3",
+        exit_code=0,
+        stdout="",
+        stderr="",
+        output_files={},
+        duration_ms=1,
+    )
+
+    tool = create_execute_code_tool(sandbox, tenant)
+    await tool.ainvoke({"code": "print('ok')"})
+
+    _, kwargs = sandbox.execute.call_args
+    env = kwargs.get("env", {})
+    # Prefixed keys present
+    assert env["PROD_DB_DB_HOST"] == "prod.host"
+    assert env["DEV_DB_DB_HOST"] == "dev.host"
+    assert env["PROD_DB_DB_PORT"] == "5432"
+    assert env["DEV_DB_DB_PORT"] == "5433"
+    # Unprefixed keys must NOT be present (collision would occur)
+    assert "DB_HOST" not in env
+    assert "DB_PORT" not in env
+
+
+@pytest.mark.asyncio
+async def test_execute_code_tool_injects_pythonpath() -> None:
+    """scripts_dirs should be injected as PYTHONPATH in sandbox env."""
+    tenant = TenantContext(tenant_id="t", user_id="u")
+    sandbox = AsyncMock()
+    sandbox.execute.return_value = ExecuteResult(
+        execution_id="exec-4",
+        exit_code=0,
+        stdout="",
+        stderr="",
+        output_files={},
+        duration_ms=1,
+    )
+
+    tool = create_execute_code_tool(sandbox, tenant, scripts_dirs=["/path/to/scripts"])
+    await tool.ainvoke({"code": "pass"})
+
+    _, kwargs = sandbox.execute.call_args
+    env = kwargs.get("env", {})
+    assert env["PYTHONPATH"] == "/path/to/scripts"

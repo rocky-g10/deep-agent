@@ -141,3 +141,57 @@ def test_load_mcp_config_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(MCPConfigError, match="path traversal"):
         load_mcp_config(tenant, config_root=tmp_path)
+
+
+def test_load_mcp_config_uses_mcp_config_path(tmp_path: Path) -> None:
+    """When mcp_config_path is set, it should be used instead of tenant_id derivation."""
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    (custom_dir / "my-mcp.json").write_text(
+        '{"servers": [{"name": "custom", "transport": "stdio", "command": ["echo"]}]}',
+        encoding="utf-8",
+    )
+
+    tenant = TenantContext(
+        tenant_id="equities",
+        user_id="test-user",
+        mcp_config_path="custom/my-mcp.json",
+    )
+
+    config = load_mcp_config(tenant, config_root=tmp_path)
+
+    assert len(config.servers) == 1
+    assert config.servers[0].name == "custom"
+
+
+def test_load_mcp_config_falls_back_to_tenant_id(tmp_path: Path) -> None:
+    """When mcp_config_path is empty, path should be derived from tenant_id."""
+    config_dir = tmp_path / "tenants" / "equities"
+    config_dir.mkdir(parents=True)
+    (config_dir / "mcp.json").write_text(
+        '{"servers": [{"name": "derived", "transport": "stdio", "command": ["echo"]}]}',
+        encoding="utf-8",
+    )
+
+    tenant = TenantContext(
+        tenant_id="equities",
+        user_id="test-user",
+        mcp_config_path="",
+    )
+
+    config = load_mcp_config(tenant, config_root=tmp_path)
+
+    assert len(config.servers) == 1
+    assert config.servers[0].name == "derived"
+
+
+def test_load_mcp_config_path_traversal_via_mcp_config_path(tmp_path: Path) -> None:
+    """Path traversal via mcp_config_path should be rejected."""
+    tenant = TenantContext(
+        tenant_id="equities",
+        user_id="test-user",
+        mcp_config_path="../../etc/passwd",
+    )
+
+    with pytest.raises(MCPConfigError, match="path traversal"):
+        load_mcp_config(tenant, config_root=tmp_path)

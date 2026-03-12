@@ -33,6 +33,7 @@ _SANDBOX_ENV_ALLOWLIST = frozenset(
     }
 )
 _ALLOWED_ENV_PREFIXES = ("DB_", "CH_", "PG_", "REDIS_", "MONGO_", "RESOURCE_", "KDB_", "API_")
+_SANDBOX_ENV_OVERRIDE_EXACT = frozenset({"PYTHONPATH"})
 
 
 class PythonSubprocessSandbox:
@@ -141,10 +142,12 @@ class PythonSubprocessSandbox:
 
         if env_overrides:
             for key, val in env_overrides.items():
-                if any(key.startswith(prefix) for prefix in _ALLOWED_ENV_PREFIXES):
+                if (
+                    key in _SANDBOX_ENV_OVERRIDE_EXACT
+                    or any(key.startswith(prefix) for prefix in _ALLOWED_ENV_PREFIXES)
+                ):
                     process_env[key] = val
                 else:
-                    # Warning for visibility when a caller attempts unsafe overrides.
                     logger.warning("Blocked disallowed env override: %s", key)
 
         return process_env

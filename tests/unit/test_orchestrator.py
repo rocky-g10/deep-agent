@@ -30,7 +30,8 @@ def _mock_skill_engine(matches: list[SkillSummary] | None = None) -> MagicMock:
         skill_content.name = matches[0].name
         skill_content.skill_id = matches[0].skill_id
         skill_content.body = "## Instructions\nDo stuff."
-        skill_content.allowed_tools = ["query_database", "execute_code"]
+        skill_content.allowed_tools = ["execute_code"]
+        skill_content.scripts_path = ""
         engine.load.return_value = skill_content
     return engine
 
@@ -259,3 +260,60 @@ async def test_handle_message_without_mcp_manager(
     ]
 
     assert isinstance(events[-1], AgentCompleteEvent)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_requires_skill_bindings(
+    tenant_equities: TenantContext,
+) -> None:
+    """handle_message must require skill_bindings — omitting it is a TypeError."""
+    orchestrator = AgentOrchestrator(
+        skill_engine=MagicMock(),
+        llm_router=MagicMock(),
+        runtime=MagicMock(),
+        sandbox=AsyncMock(),
+    )
+
+    with pytest.raises(TypeError):
+        # noinspection PyArgumentList
+        _ = [
+            event
+            async for event in orchestrator.handle_message("hello", tenant_equities)  # type: ignore[call-arg]
+        ]
+
+
+@pytest.mark.asyncio
+async def test_skill_allowed_tools_present_after_assembly(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
+    """When a skill matches, execute_code must survive tool filtering."""
+    skill_match = SkillSummary(
+        skill_id="equities/zscore-monitor",
+        name="zscore-monitor",
+        description="Monitor z-scores",
+        tags=["zscore"],
+    )
+    engine = _mock_skill_engine([skill_match])
+
+    runtime = MagicMock()
+    runtime.create_agent.return_value = MagicMock()
+    runtime.stream = _fake_stream
+
+    orchestrator = AgentOrchestrator(
+        skill_engine=engine,
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+    )
+
+    _ = [
+        event
+        async for event in orchestrator.handle_message(
+            "z-scores for AAPL", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
+
+    tools = runtime.create_agent.call_args.kwargs["tools"]
+    tool_names = {getattr(t, "name", None) for t in tools}
+    assert "execute_code" in tool_names

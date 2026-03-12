@@ -224,3 +224,25 @@ print(os.environ.get('API_TOKEN', 'MISSING'))
     assert lines[1] == "kdb-host.local"
     assert lines[2] == "api-tok-456"
     await sandbox.cleanup(result.execution_id)
+
+
+@pytest.mark.timeout(10)
+async def test_pythonpath_env_enables_skill_script_imports(tmp_path: Path) -> None:
+    """PYTHONPATH override should allow sandbox to import skill helper modules."""
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "helper.py").write_text("VALUE = 42\n", encoding="utf-8")
+
+    sandbox = PythonSubprocessSandbox()
+    code = """
+from helper import VALUE
+print(VALUE)
+"""
+
+    result = await sandbox.execute(
+        code, env={"PYTHONPATH": str(scripts_dir)}
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "42"
+    await sandbox.cleanup(result.execution_id)

@@ -58,6 +58,9 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
     )
 
     body = post.content or ""
+    scripts_dir = path.parent / "scripts"
+    scripts_path = str(scripts_dir.resolve()) if scripts_dir.is_dir() else ""
+
     return SkillContent(
         skill_id=skill_id,
         name=_as_string(metadata["name"], field_name="name", path=path),
@@ -66,6 +69,7 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
         tags=tags,
         allowed_tools=allowed_tools,
         body=body,
+        scripts_path=scripts_path,
     )
 
 

@@ -16,7 +16,7 @@ def test_parse_reference_db_query_skill() -> None:
 
     assert skill.skill_id == "common/db-query"
     assert skill.name == "db-query"
-    assert skill.allowed_tools == ["query_database", "execute_code"]
+    assert skill.allowed_tools == ["execute_code"]
     assert "## Instructions" in skill.body
 
 

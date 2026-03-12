@@ -30,6 +30,7 @@ class SkillContent(SkillMetadata):
     """Full skill definition including markdown instruction body."""
 
     body: str
+    scripts_path: str = ""
 
 
 @dataclass(frozen=True)

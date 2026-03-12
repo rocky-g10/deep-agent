@@ -50,14 +50,18 @@ class AgentOrchestrator:
         self,
         message: str,
         context: TenantContext,
-        skill_bindings: AgentSkillBindings | None = None,
+        skill_bindings: AgentSkillBindings,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message and stream normalized runtime events."""
         try:
-            bindings = skill_bindings or AgentSkillBindings(agent_id="default", bound_skill_ids=())
+            if not skill_bindings.bound_skill_ids:
+                logger.warning(
+                    "Agent '%s' has no bound skills — no skills will be matched",
+                    skill_bindings.agent_id,
+                )
 
-            all_skills = self._skill_engine.discover(bindings)
-            matched_skills = self._skill_engine.match(message, bindings, top_k=1)
+            all_skills = self._skill_engine.discover(skill_bindings)
+            matched_skills = self._skill_engine.match(message, skill_bindings, top_k=1)
 
             skill_content: SkillContent | None = None
             allowed_tools: list[str] | None = None
@@ -66,13 +70,18 @@ class AgentOrchestrator:
                 top_match = matched_skills[0]
                 yield SkillMatchEvent(skill_id=top_match.skill_id, confidence=top_match.score)
                 try:
-                    skill_content = self._skill_engine.load(top_match.skill_id, bindings)
+                    skill_content = self._skill_engine.load(top_match.skill_id, skill_bindings)
                     allowed_tools = list(skill_content.allowed_tools)
                 except Exception as exc:
                     logger.warning("Failed to load matched skill '%s': %s", top_match.skill_id, exc)
 
             llm_config = self._llm_router.resolve(context)
-            builtin_tools = self._build_builtin_tools(context)
+            scripts_dirs = (
+                [skill_content.scripts_path]
+                if skill_content and skill_content.scripts_path
+                else None
+            )
+            builtin_tools = self._build_builtin_tools(context, scripts_dirs=scripts_dirs)
             mcp_tools = await self._get_mcp_tools()
             all_tools = builtin_tools + self._extra_tools + mcp_tools
             if allowed_tools is not None:
@@ -98,13 +107,16 @@ class AgentOrchestrator:
             logger.exception("Orchestrator error")
             yield ErrorEvent(code="ORCHESTRATOR_ERROR", message=str(exc))
 
-    def _build_builtin_tools(self, context: TenantContext) -> list[BaseTool]:
+    def _build_builtin_tools(
+        self, context: TenantContext, scripts_dirs: list[str] | None = None
+    ) -> list[BaseTool]:
         """Create built-in tools bound to tenant-scoped dependencies."""
         tools: list[BaseTool] = []
         tools.append(
             create_execute_code_tool(
                 sandbox=self._sandbox,
                 tenant=context,
+                scripts_dirs=scripts_dirs,
             )
         )
         return tools

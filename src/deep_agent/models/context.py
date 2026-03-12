@@ -20,7 +20,7 @@ class TenantContext:
         return cls(
             tenant_id="equities",
             user_id="dev-user",
-            mcp_config_path="config/tenants/equities/mcp.json",
+            mcp_config_path="tenants/equities/mcp.json",
             resource_env={
                 "ch-equities": {
                     "DB_HOST": "localhost",

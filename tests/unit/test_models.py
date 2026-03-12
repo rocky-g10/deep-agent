@@ -29,7 +29,7 @@ def test_tenant_context_stub_returns_expected_equities_values() -> None:
 
     assert stub.tenant_id == "equities"
     assert stub.user_id == "dev-user"
-    assert stub.mcp_config_path == "config/tenants/equities/mcp.json"
+    assert stub.mcp_config_path == "tenants/equities/mcp.json"
     assert "ch-equities" in stub.resource_env
 
 

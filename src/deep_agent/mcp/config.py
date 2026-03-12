@@ -40,11 +40,19 @@ def load_mcp_config(
     tenant: TenantContext,
     config_root: Path = _DEFAULT_CONFIG_ROOT,
 ) -> MCPConfig:
-    """Load and validate MCP config for a tenant."""
-    config_path = (config_root / "tenants" / tenant.tenant_id / "mcp.json").resolve()
-    safe_root = (config_root / "tenants").resolve()
+    """Load and validate MCP config for a tenant.
+
+    Uses tenant.mcp_config_path when set; otherwise derives path from tenant_id.
+    """
+    if tenant.mcp_config_path:
+        config_path = (config_root / tenant.mcp_config_path).resolve()
+    else:
+        config_path = (config_root / "tenants" / tenant.tenant_id / "mcp.json").resolve()
+    safe_root = config_root.resolve()
     if not config_path.is_relative_to(safe_root):
-        raise MCPConfigError(f"Invalid tenant_id '{tenant.tenant_id}': path traversal detected")
+        raise MCPConfigError(
+            f"MCP config path escapes config root: path traversal detected"
+        )
 
     try:
         raw_text = config_path.read_text(encoding="utf-8")
