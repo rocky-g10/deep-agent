@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 from deep_agent.models import TenantContext
-
-# Make stubs/ importable for firm.stats tests.
-_stubs_dir = Path(__file__).resolve().parent.parent / "stubs"
-if str(_stubs_dir) not in sys.path:
-    sys.path.insert(0, str(_stubs_dir))
+from deep_agent.models.skills import AgentSkillBindings
 
 
 @pytest.fixture
@@ -21,6 +14,20 @@ def tenant_equities() -> TenantContext:
     return TenantContext(
         tenant_id="equities",
         user_id="test-user",
-        skills_dirs=("skills/common", "skills/equities"),
-        db_aliases=("ch-equities",),
+        resource_env={
+            "ch-equities": {
+                "DB_HOST": "localhost",
+                "DB_PORT": "8123",
+                "DB_NAME": "default",
+            }
+        },
+    )
+
+
+@pytest.fixture
+def skill_bindings() -> AgentSkillBindings:
+    """Standard skill bindings for the equities agent."""
+    return AgentSkillBindings(
+        agent_id="equities-agent",
+        bound_skill_ids=("common/db-query", "equities/zscore-monitor"),
     )

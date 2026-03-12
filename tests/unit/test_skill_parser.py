@@ -16,7 +16,6 @@ def test_parse_reference_db_query_skill() -> None:
 
     assert skill.skill_id == "common/db-query"
     assert skill.name == "db-query"
-    assert skill.tenant == "common"
     assert skill.allowed_tools == ["query_database", "execute_code"]
     assert "## Instructions" in skill.body
 
@@ -97,7 +96,7 @@ allowed-tools: [query_database]
 
 
 def test_extra_frontmatter_fields_are_ignored(tmp_path: Path) -> None:
-    """Parser should ignore unknown frontmatter fields."""
+    """Parser should ignore unknown frontmatter fields (including tenant)."""
     skill_path = tmp_path / "skills" / "common" / "extra" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text(
@@ -120,6 +119,7 @@ Body
 
     assert dumped["name"] == "extra"
     assert "custom_field" not in dumped
+    assert "tenant" not in dumped
 
 
 def test_skill_id_derives_from_relative_path(tmp_path: Path) -> None:

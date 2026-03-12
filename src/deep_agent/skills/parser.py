@@ -16,7 +16,6 @@ REQUIRED_SKILL_FIELDS: tuple[str, ...] = (
     "description",
     "version",
     "tags",
-    "tenant",
     "allowed-tools",
 )
 
@@ -66,7 +65,6 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
         version=_as_string(metadata["version"], field_name="version", path=path),
         tags=tags,
         allowed_tools=allowed_tools,
-        tenant=_as_string(metadata["tenant"], field_name="tenant", path=path),
         body=body,
     )
 

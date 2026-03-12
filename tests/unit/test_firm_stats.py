@@ -1,9 +1,25 @@
-"""Unit tests for firm.stats stubs."""
+"""Unit tests for firm_stats module (formerly firm.stats stubs)."""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pandas as pd
-from firm.stats import moving_avg, zscore
+
+# Add the examples skill scripts directory to sys.path so firm_stats is importable.
+_scripts_dir = str(
+    Path(__file__).resolve().parent.parent.parent
+    / "examples"
+    / "skills"
+    / "equities"
+    / "zscore-monitor"
+    / "scripts"
+)
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
+from firm_stats import moving_avg, zscore  # noqa: E402
 
 
 def test_moving_avg_basic() -> None:

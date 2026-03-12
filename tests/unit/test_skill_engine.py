@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from deep_agent.models import TenantContext
+from deep_agent.models.skills import AgentSkillBindings
 from deep_agent.skills.engine import SkillEngine, SkillNotFoundError
 
 
@@ -30,7 +30,6 @@ def _write_skill(
     name: str,
     description: str,
     tags: list[str],
-    tenant: str,
 ) -> None:
     skill_path = root / tenant_dir / skill_dir / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +43,7 @@ def _write_skill(
                 'version: "1.0.0"',
                 "tags:",
                 tags_yaml,
-                f"tenant: {tenant}",
+                f"tenant: {tenant_dir}",
                 "allowed-tools:",
                 "  - query_database",
                 "  - execute_code",
@@ -71,7 +70,6 @@ def temp_skills_root(tmp_path: Path) -> Path:
         name="db-query",
         description="Query databases",
         tags=["database", "query", "sql", "data"],
-        tenant="common",
     )
     _write_skill(
         root=root,
@@ -80,7 +78,6 @@ def temp_skills_root(tmp_path: Path) -> Path:
         name="zscore-monitor",
         description="Monitor z-scores for equities",
         tags=["equities", "zscore", "volume", "monitor"],
-        tenant="equities",
     )
     _write_skill(
         root=root,
@@ -89,18 +86,17 @@ def temp_skills_root(tmp_path: Path) -> Path:
         name="var-report",
         description="Run risk VaR report",
         tags=["risk", "var", "report"],
-        tenant="risk",
     )
     return root
 
 
-def test_discover_returns_common_and_tenant_skills(
-    temp_skills_root: Path, tenant_equities: TenantContext
+def test_discover_returns_bound_skills(
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
-    """Discover should include common and tenant-local skills only."""
+    """Discover should return only the skills bound to the agent."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    discovered = engine.discover(tenant_equities)
+    discovered = engine.discover(skill_bindings)
     ids = [skill.skill_id for skill in discovered]
 
     assert "common/db-query" in ids
@@ -108,74 +104,74 @@ def test_discover_returns_common_and_tenant_skills(
     assert len(discovered) == 2
 
 
-def test_discover_excludes_other_tenants(
-    temp_skills_root: Path, tenant_equities: TenantContext
+def test_discover_excludes_unbound_skills(
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
-    """Discover should not leak skills from other tenants."""
+    """Discover should not include skills not in the agent's bound_skill_ids."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    discovered = engine.discover(tenant_equities)
+    discovered = engine.discover(skill_bindings)
     ids = [skill.skill_id for skill in discovered]
 
     assert "risk/var-report" not in ids
 
 
 def test_match_zscore_query_ranks_zscore_first(
-    temp_skills_root: Path, tenant_equities: TenantContext
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
     """Tag-overlap scoring should prioritize zscore skill for zscore query."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("z-scores for AAPL volume", tenant_equities, top_k=2)
+    matched = engine.match("z-scores for AAPL volume", skill_bindings, top_k=2)
 
     assert matched[0].skill_id == "equities/zscore-monitor"
 
 
 def test_match_query_database_ranks_db_query_first(
-    temp_skills_root: Path, tenant_equities: TenantContext
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
     """Tag-overlap scoring should prioritize db-query for database query text."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("query database", tenant_equities, top_k=2)
+    matched = engine.match("query database", skill_bindings, top_k=2)
 
     assert matched[0].skill_id == "common/db-query"
 
 
 def test_load_returns_full_skill_content(
-    temp_skills_root: Path, tenant_equities: TenantContext
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
     """Load should return full parsed content including markdown body."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    skill = engine.load("equities/zscore-monitor", tenant_equities)
+    skill = engine.load("equities/zscore-monitor", skill_bindings)
 
     assert skill.skill_id == "equities/zscore-monitor"
     assert "## Instructions" in skill.body
 
 
 def test_load_missing_skill_raises_not_found(
-    temp_skills_root: Path, tenant_equities: TenantContext
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
     """Load should raise when skill_id does not exist."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
     with pytest.raises(SkillNotFoundError):
-        engine.load("equities/not-real", tenant_equities)
+        engine.load("equities/not-real", skill_bindings)
 
 
-def test_load_wrong_tenant_raises_not_found(
-    temp_skills_root: Path, tenant_equities: TenantContext
+def test_load_unbound_skill_raises_not_found(
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
-    """Load should raise when tenant attempts to access another tenant's skill."""
+    """Load should raise when skill is not bound to the agent."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
     with pytest.raises(SkillNotFoundError):
-        engine.load("risk/var-report", tenant_equities)
+        engine.load("risk/var-report", skill_bindings)
 
 
 def test_cache_invalidation_picks_up_filesystem_changes(
-    tenant_equities: TenantContext, tmp_path: Path
+    skill_bindings: AgentSkillBindings, tmp_path: Path
 ) -> None:
     """Engine should rescan after TTL and include newly added skills."""
     skills_root = tmp_path / "skills"
@@ -186,7 +182,6 @@ def test_cache_invalidation_picks_up_filesystem_changes(
         name="db-query",
         description="Query databases",
         tags=["database", "query", "sql", "data"],
-        tenant="common",
     )
     _write_skill(
         root=skills_root,
@@ -195,13 +190,12 @@ def test_cache_invalidation_picks_up_filesystem_changes(
         name="zscore-monitor",
         description="Monitor z-scores for equities",
         tags=["equities", "zscore", "volume", "monitor"],
-        tenant="equities",
     )
 
     fake_clock = FakeClock(now=10.0)
     engine = SkillEngine(skills_root=skills_root, cache_ttl=5, clock=fake_clock)
 
-    baseline = {skill.skill_id for skill in engine.discover(tenant_equities)}
+    baseline = {skill.skill_id for skill in engine.discover(skill_bindings)}
     assert baseline == {"common/db-query", "equities/zscore-monitor"}
 
     _write_skill(
@@ -211,21 +205,30 @@ def test_cache_invalidation_picks_up_filesystem_changes(
         name="momentum-watch",
         description="Monitor momentum",
         tags=["equities", "momentum"],
-        tenant="equities",
     )
 
-    pre_ttl = {skill.skill_id for skill in engine.discover(tenant_equities)}
+    pre_ttl = {skill.skill_id for skill in engine.discover(skill_bindings)}
     assert pre_ttl == baseline
 
     fake_clock.advance(6.0)
-    post_ttl = {skill.skill_id for skill in engine.discover(tenant_equities)}
+
+    # Need bindings that include the new skill to see it after cache refresh
+    expanded_bindings = AgentSkillBindings(
+        agent_id="equities-agent",
+        bound_skill_ids=(
+            "common/db-query",
+            "equities/zscore-monitor",
+            "equities/momentum-watch",
+        ),
+    )
+    post_ttl = {skill.skill_id for skill in engine.discover(expanded_bindings)}
 
     assert "equities/momentum-watch" in post_ttl
 
 
 def test_discover_skips_malformed_skill_file(
     tmp_path: Path,
-    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
 ) -> None:
     """Malformed skill files should be skipped without failing discovery."""
     skills_root = tmp_path / "skills"
@@ -236,7 +239,6 @@ def test_discover_skips_malformed_skill_file(
         name="db-query",
         description="Query databases",
         tags=["database"],
-        tenant="common",
     )
     bad_skill = skills_root / "equities" / "broken" / "SKILL.md"
     bad_skill.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +257,7 @@ bad
     )
 
     engine = SkillEngine(skills_root=skills_root)
-    discovered = engine.discover(tenant_equities)
+    discovered = engine.discover(skill_bindings)
 
     assert len(discovered) == 1
     assert discovered[0].skill_id == "common/db-query"

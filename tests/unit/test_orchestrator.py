@@ -7,9 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import SecretStr
 
-from deep_agent.config import AppSettings
 from deep_agent.models import (
     AgentChunkEvent,
     AgentCompleteEvent,
@@ -19,6 +17,7 @@ from deep_agent.models import (
     SkillSummary,
     TenantContext,
 )
+from deep_agent.models.skills import AgentSkillBindings
 from deep_agent.orchestrator.agent_orchestrator import AgentOrchestrator, _filter_tools
 
 
@@ -42,7 +41,10 @@ async def _fake_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]
 
 
 @pytest.mark.asyncio
-async def test_handle_message_yields_skill_match_first(tenant_equities: TenantContext) -> None:
+async def test_handle_message_yields_skill_match_first(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
     """First event should be SkillMatchEvent when a skill matches."""
     skill_match = SkillSummary(
         skill_id="equities/zscore-monitor",
@@ -61,15 +63,13 @@ async def test_handle_message_yields_skill_match_first(tenant_equities: TenantCo
         llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
         runtime=runtime,
         sandbox=AsyncMock(),
-        db_registry=MagicMock(
-            list_aliases=MagicMock(return_value=[]),
-            get_metadata=MagicMock(),
-            _settings=AppSettings(OPENAI_API_KEY=SecretStr("test-key")),
-        ),
     )
 
     events = [
-        event async for event in orchestrator.handle_message("z-scores for AAPL", tenant_equities)
+        event
+        async for event in orchestrator.handle_message(
+            "z-scores for AAPL", tenant_equities, skill_bindings=skill_bindings
+        )
     ]
 
     assert events[0].type == "skill_match"
@@ -78,7 +78,10 @@ async def test_handle_message_yields_skill_match_first(tenant_equities: TenantCo
 
 
 @pytest.mark.asyncio
-async def test_handle_message_no_skill_match_no_filter(tenant_equities: TenantContext) -> None:
+async def test_handle_message_no_skill_match_no_filter(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
     """When no skills match, all tools should be available (no filtering)."""
     engine = _mock_skill_engine([])
 
@@ -86,29 +89,30 @@ async def test_handle_message_no_skill_match_no_filter(tenant_equities: TenantCo
     runtime.create_agent.return_value = MagicMock()
     runtime.stream = _fake_stream
 
-    db_registry = MagicMock()
-    db_registry.list_aliases.return_value = []
-    db_registry._settings = AppSettings(OPENAI_API_KEY=SecretStr("test-key"))
-
     orchestrator = AgentOrchestrator(
         skill_engine=engine,
         llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
         runtime=runtime,
         sandbox=AsyncMock(),
-        db_registry=db_registry,
     )
 
     events = [
-        event async for event in orchestrator.handle_message("random question", tenant_equities)
+        event
+        async for event in orchestrator.handle_message(
+            "random question", tenant_equities, skill_bindings=skill_bindings
+        )
     ]
 
     assert not any(event.type == "skill_match" for event in events)
     tools = runtime.create_agent.call_args.kwargs["tools"]
-    assert len(tools) >= 2
+    assert len(tools) >= 1
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_contains_skill_body(tenant_equities: TenantContext) -> None:
+async def test_system_prompt_contains_skill_body(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
     """System prompt should include the matched skill instructions."""
     skill_match = SkillSummary(
         skill_id="common/db-query",
@@ -122,23 +126,64 @@ async def test_system_prompt_contains_skill_body(tenant_equities: TenantContext)
     runtime.create_agent.return_value = MagicMock()
     runtime.stream = _fake_stream
 
-    db_registry = MagicMock()
-    db_registry.list_aliases.return_value = []
-    db_registry._settings = AppSettings(OPENAI_API_KEY=SecretStr("test-key"))
+    orchestrator = AgentOrchestrator(
+        skill_engine=engine,
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+    )
+
+    _ = [
+        event
+        async for event in orchestrator.handle_message(
+            "query data", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
+
+    system_prompt = runtime.create_agent.call_args.kwargs["system_prompt"]
+    assert "Active Skill: db-query" in system_prompt
+    assert "Do stuff" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_contains_available_resources(
+    skill_bindings: AgentSkillBindings,
+) -> None:
+    """System prompt should include 'Available Resources' when resource_env is populated."""
+    engine = _mock_skill_engine([])
+
+    runtime = MagicMock()
+    runtime.create_agent.return_value = MagicMock()
+    runtime.stream = _fake_stream
+
+    tenant = TenantContext(
+        tenant_id="equities",
+        user_id="test-user",
+        resource_env={
+            "ch-equities": {
+                "DB_HOST": "localhost",
+                "DB_PORT": "8123",
+            }
+        },
+    )
 
     orchestrator = AgentOrchestrator(
         skill_engine=engine,
         llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
         runtime=runtime,
         sandbox=AsyncMock(),
-        db_registry=db_registry,
     )
 
-    _ = [event async for event in orchestrator.handle_message("query data", tenant_equities)]
+    _ = [
+        event
+        async for event in orchestrator.handle_message(
+            "hello", tenant, skill_bindings=skill_bindings
+        )
+    ]
 
     system_prompt = runtime.create_agent.call_args.kwargs["system_prompt"]
-    assert "Active Skill: db-query" in system_prompt
-    assert "Do stuff" in system_prompt
+    assert "Available Resources" in system_prompt
+    assert "ch-equities" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -161,7 +206,10 @@ async def test_tool_filtering_by_allowed_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_error_yields_error_event(tenant_equities: TenantContext) -> None:
+async def test_handle_message_error_yields_error_event(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
     """Unexpected orchestrator errors should emit ErrorEvent."""
     engine = MagicMock()
     engine.discover.return_value = []
@@ -172,19 +220,23 @@ async def test_handle_message_error_yields_error_event(tenant_equities: TenantCo
         llm_router=MagicMock(),
         runtime=MagicMock(),
         sandbox=AsyncMock(),
-        db_registry=MagicMock(
-            list_aliases=MagicMock(return_value=[]),
-            _settings=AppSettings(OPENAI_API_KEY=SecretStr("test-key")),
-        ),
     )
 
-    events = [event async for event in orchestrator.handle_message("test", tenant_equities)]
+    events = [
+        event
+        async for event in orchestrator.handle_message(
+            "test", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
 
     assert any(isinstance(event, ErrorEvent) for event in events)
 
 
 @pytest.mark.asyncio
-async def test_handle_message_without_mcp_manager(tenant_equities: TenantContext) -> None:
+async def test_handle_message_without_mcp_manager(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
     """Orchestrator should work without MCPManager configured."""
     engine = _mock_skill_engine([])
     runtime = MagicMock()
@@ -196,13 +248,14 @@ async def test_handle_message_without_mcp_manager(tenant_equities: TenantContext
         llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
         runtime=runtime,
         sandbox=AsyncMock(),
-        db_registry=MagicMock(
-            list_aliases=MagicMock(return_value=[]),
-            _settings=AppSettings(OPENAI_API_KEY=SecretStr("test-key")),
-        ),
         mcp_manager=None,
     )
 
-    events = [event async for event in orchestrator.handle_message("hello", tenant_equities)]
+    events = [
+        event
+        async for event in orchestrator.handle_message(
+            "hello", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
 
     assert isinstance(events[-1], AgentCompleteEvent)

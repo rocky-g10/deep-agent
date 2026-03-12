@@ -7,7 +7,6 @@ tags:
   - query
   - sql
   - data
-tenant: common
 allowed-tools:
   - query_database
   - execute_code

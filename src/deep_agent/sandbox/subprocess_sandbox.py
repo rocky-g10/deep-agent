@@ -32,15 +32,14 @@ _SANDBOX_ENV_ALLOWLIST = frozenset(
         "TERM",
     }
 )
-_ALLOWED_ENV_PREFIXES = ("DB_", "CH_", "PG_", "REDIS_", "MONGO_")
+_ALLOWED_ENV_PREFIXES = ("DB_", "CH_", "PG_", "REDIS_", "MONGO_", "RESOURCE_", "KDB_", "API_")
 
 
 class PythonSubprocessSandbox:
     """SandboxManager implementation using Python subprocesses."""
 
-    def __init__(self, stubs_path: Path | None = None, max_tracked: int = 100) -> None:
+    def __init__(self, max_tracked: int = 100) -> None:
         """Initialize sandbox execution backend."""
-        self._stubs_path = stubs_path
         self._max_tracked = max_tracked
         self._executions: dict[str, Path] = {}
         self._lock = threading.Lock()
@@ -139,14 +138,6 @@ class PythonSubprocessSandbox:
             for key, val in os.environ.items()
             if key in _SANDBOX_ENV_ALLOWLIST
         }
-
-        if self._stubs_path is not None:
-            existing_path = process_env.get("PYTHONPATH", "")
-            stubs_entry = str(self._stubs_path)
-            if existing_path:
-                process_env["PYTHONPATH"] = f"{stubs_entry}{os.pathsep}{existing_path}"
-            else:
-                process_env["PYTHONPATH"] = stubs_entry
 
         if env_overrides:
             for key, val in env_overrides.items():

@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {
+      "name": "market-data-mock",
+      "transport": "stdio",
+      "command": ["python", "-m", "examples.mock_mcp_server"]
+    }
+  ]
+}

@@ -1,4 +1,8 @@
-"""Stub implementation of firm.stats with real math."""
+"""Skill-bundled analytics module for zscore-monitor.
+
+Imported by sandbox code: `from firm_stats import zscore, moving_avg`.
+The skill's scripts/ directory is automatically on PYTHONPATH.
+"""
 
 from __future__ import annotations
 

@@ -9,13 +9,12 @@ from pydantic import SecretStr, TypeAdapter
 from deep_agent.config import AppSettings
 from deep_agent.models import (
     AgentEvent,
-    ConnectionConfig,
-    DatabaseAlias,
     ExecuteResult,
     LLMConfig,
     ResourceLimits,
     TenantContext,
 )
+from deep_agent.models.skills import AgentSkillBindings
 
 
 def _roundtrip(model: Any) -> Any:
@@ -30,8 +29,8 @@ def test_tenant_context_stub_returns_expected_equities_values() -> None:
 
     assert stub.tenant_id == "equities"
     assert stub.user_id == "dev-user"
-    assert stub.skills_dirs == ("skills/common", "skills/equities")
-    assert stub.db_aliases == ("ch-equities",)
+    assert stub.mcp_config_path == "config/tenants/equities/mcp.json"
+    assert "ch-equities" in stub.resource_env
 
 
 def test_llm_config_roundtrip() -> None:
@@ -65,28 +64,6 @@ def test_execute_result_output_files_json_roundtrip() -> None:
     assert loaded == result
 
 
-def test_database_alias_roundtrip() -> None:
-    """DatabaseAlias should instantiate and round-trip cleanly."""
-    alias = DatabaseAlias(alias="ch-equities", engine="clickhouse", description="Equities data")
-
-    loaded = _roundtrip(alias)
-    assert loaded == alias
-
-
-def test_connection_config_roundtrip() -> None:
-    """ConnectionConfig should instantiate and round-trip cleanly."""
-    config = ConnectionConfig(
-        engine="clickhouse",
-        host="localhost",
-        port=8123,
-        database="default",
-        credentials_ref="secret://clickhouse/default",
-    )
-
-    loaded = _roundtrip(config)
-    assert loaded == config
-
-
 def test_agent_event_discriminator_deserializes_all_event_types() -> None:
     """AgentEvent discriminated union should deserialize each event payload shape."""
     adapter: TypeAdapter[AgentEvent] = TypeAdapter(AgentEvent)
@@ -115,11 +92,22 @@ def test_app_settings_loads_defaults(monkeypatch: Any) -> None:
     """AppSettings should load defaults when optional env vars are absent."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.delenv("CLICKHOUSE_HOST", raising=False)
     monkeypatch.delenv("SKILLS_ROOT", raising=False)
 
     settings = AppSettings(OPENAI_API_KEY=SecretStr("test-key"))
 
     assert settings.openai_model == "gpt-5"
-    assert settings.clickhouse_host == "localhost"
     assert str(settings.skills_root) == "skills"
+
+
+def test_agent_skill_bindings() -> None:
+    """AgentSkillBindings should hold agent_id and bound_skill_ids."""
+    bindings = AgentSkillBindings(
+        agent_id="equities-agent",
+        bound_skill_ids=("common/db-query", "equities/zscore-monitor"),
+    )
+
+    assert bindings.agent_id == "equities-agent"
+    assert "common/db-query" in bindings.bound_skill_ids
+    assert "equities/zscore-monitor" in bindings.bound_skill_ids
+    assert len(bindings.bound_skill_ids) == 2

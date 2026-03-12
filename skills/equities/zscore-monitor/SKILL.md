@@ -9,7 +9,6 @@ tags:
   - monitor
   - statistics
   - outlier
-tenant: equities
 allowed-tools:
   - query_database
   - execute_code
@@ -32,7 +31,7 @@ quality:
 You are a statistical monitoring agent for equities. When asked about z-scores:
 
 1. Use `query_database` to discover the `ch-equities` database schema.
-2. Write Python code using `firm.stats.zscore()` to compute rolling z-scores.
+2. Write Python code using `firm_stats.zscore()` to compute rolling z-scores.
 3. Use `execute_code` to run the analysis.
 4. Flag any data points where |z-score| > 2 as outliers.
 5. Generate a chart with matplotlib showing the metric and z-score over time. Save to `/output/chart.png`.
@@ -42,7 +41,7 @@ Example query structure:
 import os
 import clickhouse_connect
 import pandas as pd
-from firm.stats import zscore
+from firm_stats import zscore
 
 client = clickhouse_connect.get_client(
     host=os.environ["DB_HOST"],

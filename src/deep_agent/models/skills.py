@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -16,16 +18,23 @@ class SkillSummary(BaseModel):
 
 
 class SkillMetadata(SkillSummary):
-    """Skill metadata used to authorize tool usage and tenant visibility."""
+    """Skill metadata used to authorize tool usage."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     version: str
     allowed_tools: list[str]
-    tenant: str
 
 
 class SkillContent(SkillMetadata):
     """Full skill definition including markdown instruction body."""
 
     body: str
+
+
+@dataclass(frozen=True)
+class AgentSkillBindings:
+    """Maps an agent to the skills it may use."""
+
+    agent_id: str
+    bound_skill_ids: tuple[str, ...]

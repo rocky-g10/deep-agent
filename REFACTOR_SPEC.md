@@ -49,5 +49,41 @@ Write the complete refactoring plan to `docs/REFACTOR_PLAN.md` with:
 6. Dependency changes
 7. Execution order (what to do first, what depends on what)
 
+## 6. Runnable Example Agent (REQUIRED)
+
+Create a complete, runnable example under `examples/` that a new developer can clone and execute in 5 minutes. This must cohesively demonstrate ALL framework features working together:
+
+### Structure:
+```
+examples/
+├── agents/
+│   └── risk-desk-agent.yaml          # Agent config with skill bindings
+├── tenants/
+│   └── risk/
+│       ├── resources.yaml            # Resource aliases (KDB+ or mock DB)
+│       └── mcp.json                  # MCP server config
+├── skills/
+│   └── risk/
+│       └── portfolio-var/            # Complete skill (SKILL.md + scripts/)
+│           ├── SKILL.md
+│           ├── scripts/
+│           │   ├── risk_calc.py      # Custom Python module (Pattern A)
+│           │   └── requirements.txt
+│           ├── references/
+│           └── assets/
+├── docker-compose.yml                # Local services (mock DB + mock MCP)
+├── seed_data.py                      # Seeds sample portfolio data
+├── run_example.py                    # One-command launcher: start server + send test query
+└── README.md                         # "Run this example in 5 minutes"
+```
+
+### Requirements:
+- Must work out of the box with `docker compose up && python run_example.py`
+- Use a MOCK or lightweight DB (SQLite or in-memory) so devs don't need KDB+ installed
+- Include a mock MCP server that returns sample market data
+- The example query "What's the 1-day 95% VaR for portfolio EQ-MACRO-1?" must produce a real result with a chart
+- Also move the existing example code here: DatabaseRegistry, query_database tool, firm.stats stubs, ClickHouse docker-compose
+- README.md should be copy-paste runnable — prerequisites, setup, run, expected output
+
 ## Important
 This is PLAN ONLY — do NOT make any code changes. Just produce the plan document.

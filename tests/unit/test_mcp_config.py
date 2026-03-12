@@ -14,8 +14,6 @@ def _tenant(tenant_id: str = "equities") -> TenantContext:
     return TenantContext(
         tenant_id=tenant_id,
         user_id="test-user",
-        skills_dirs=(),
-        db_aliases=(),
     )
 
 
@@ -139,8 +137,6 @@ def test_load_mcp_config_path_traversal(tmp_path: Path) -> None:
     tenant = TenantContext(
         tenant_id="../../etc",
         user_id="test-user",
-        skills_dirs=(),
-        db_aliases=(),
     )
 
     with pytest.raises(MCPConfigError, match="path traversal"):

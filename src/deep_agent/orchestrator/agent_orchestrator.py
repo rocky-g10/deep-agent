@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 
 from langchain_core.tools import BaseTool
 
-from deep_agent.database.registry import DatabaseRegistry
 from deep_agent.mcp.manager import MCPManager
 from deep_agent.models import (
     AgentEvent,
@@ -17,12 +16,12 @@ from deep_agent.models import (
     SkillSummary,
     TenantContext,
 )
+from deep_agent.models.skills import AgentSkillBindings
 from deep_agent.runtime.llm_router import LLMRouter
 from deep_agent.runtime.protocol import RuntimeAdapter
 from deep_agent.sandbox.protocol import SandboxManager
 from deep_agent.skills.engine import SkillEngine
 from deep_agent.tools.execute_code import create_execute_code_tool
-from deep_agent.tools.query_database import create_query_database_tool
 
 logger = logging.getLogger(__name__)
 
@@ -36,26 +35,29 @@ class AgentOrchestrator:
         llm_router: LLMRouter,
         runtime: RuntimeAdapter,
         sandbox: SandboxManager,
-        db_registry: DatabaseRegistry,
         mcp_manager: MCPManager | None = None,
+        extra_tools: list[BaseTool] | None = None,
     ) -> None:
         """Initialize orchestrator with required subsystems."""
         self._skill_engine = skill_engine
         self._llm_router = llm_router
         self._runtime = runtime
         self._sandbox = sandbox
-        self._db_registry = db_registry
         self._mcp_manager = mcp_manager
+        self._extra_tools = extra_tools or []
 
     async def handle_message(
         self,
         message: str,
         context: TenantContext,
+        skill_bindings: AgentSkillBindings | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message and stream normalized runtime events."""
         try:
-            all_skills = self._skill_engine.discover(context)
-            matched_skills = self._skill_engine.match(message, context, top_k=1)
+            bindings = skill_bindings or AgentSkillBindings(agent_id="default", bound_skill_ids=())
+
+            all_skills = self._skill_engine.discover(bindings)
+            matched_skills = self._skill_engine.match(message, bindings, top_k=1)
 
             skill_content: SkillContent | None = None
             allowed_tools: list[str] | None = None
@@ -64,7 +66,7 @@ class AgentOrchestrator:
                 top_match = matched_skills[0]
                 yield SkillMatchEvent(skill_id=top_match.skill_id, confidence=top_match.score)
                 try:
-                    skill_content = self._skill_engine.load(top_match.skill_id, context)
+                    skill_content = self._skill_engine.load(top_match.skill_id, bindings)
                     allowed_tools = list(skill_content.allowed_tools)
                 except Exception as exc:
                     logger.warning("Failed to load matched skill '%s': %s", top_match.skill_id, exc)
@@ -72,7 +74,7 @@ class AgentOrchestrator:
             llm_config = self._llm_router.resolve(context)
             builtin_tools = self._build_builtin_tools(context)
             mcp_tools = await self._get_mcp_tools()
-            all_tools = builtin_tools + mcp_tools
+            all_tools = builtin_tools + self._extra_tools + mcp_tools
             if allowed_tools is not None:
                 all_tools = _filter_tools(all_tools, allowed_tools)
 
@@ -102,14 +104,6 @@ class AgentOrchestrator:
         tools.append(
             create_execute_code_tool(
                 sandbox=self._sandbox,
-                db_registry=self._db_registry,
-                tenant=context,
-                settings=self._db_registry._settings,
-            )
-        )
-        tools.append(
-            create_query_database_tool(
-                db_registry=self._db_registry,
                 tenant=context,
             )
         )
@@ -134,7 +128,7 @@ class AgentOrchestrator:
         skill_content: SkillContent | None,
         all_skills: list[SkillSummary],
     ) -> str:
-        """Construct a full system prompt with skills, data, and tool instructions."""
+        """Construct a full system prompt with skills, resources, and tool instructions."""
         parts: list[str] = []
 
         parts.append(f"You are Deep Agent, an AI assistant for the {context.tenant_id} desk.")
@@ -150,32 +144,19 @@ class AgentOrchestrator:
             parts.append(f"## Active Skill: {skill_content.name}")
             parts.append(skill_content.body)
 
-        aliases = self._db_registry.list_aliases(context)
-        if aliases:
+        if context.resource_env:
             parts.append("")
-            parts.append("## Available Databases")
-            for db_alias in aliases:
-                parts.append(f"- {db_alias.alias} ({db_alias.engine}): {db_alias.description}")
-
-            for db_alias in aliases:
-                try:
-                    meta = self._db_registry.get_metadata(db_alias.alias, context)
-                    for table in meta.tables:
-                        parts.append("")
-                        parts.append(f"### Table: {table.name}")
-                        parts.append("Columns:")
-                        for col_name, col_type in table.columns.items():
-                            parts.append(f"  - {col_name}: {col_type}")
-                except Exception:
-                    continue
+            parts.append("## Available Resources")
+            for alias_name, env_vars in context.resource_env.items():
+                keys = ", ".join(sorted(env_vars.keys()))
+                parts.append(f"- {alias_name}: env vars [{keys}]")
 
         parts.append("")
         parts.append("## Tool Usage")
-        parts.append("- Use `query_database` to discover schema before writing queries.")
         parts.append("- Use `execute_code` to run Python code in a sandboxed environment.")
         parts.append(
-            "- Database credentials are available as env vars: "
-            "DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME."
+            "- Resource credentials are available as env vars "
+            "(e.g., DB_HOST, DB_PORT, KDB_HOST, etc.)."
         )
         parts.append("- Save output files (charts, CSVs) to the output/ directory.")
 

@@ -31,12 +31,6 @@ class AppSettings(BaseSettings):
     openai_temperature: float = Field(default=0.0, alias="OPENAI_TEMPERATURE")
     openai_max_tokens: int = Field(default=4096, alias="OPENAI_MAX_TOKENS")
 
-    clickhouse_host: str = Field(default="localhost", alias="CLICKHOUSE_HOST")
-    clickhouse_port: int = Field(default=8123, alias="CLICKHOUSE_PORT")
-    clickhouse_database: str = Field(default="default", alias="CLICKHOUSE_DATABASE")
-    clickhouse_user: str = Field(default="default", alias="CLICKHOUSE_USER")
-    clickhouse_password: SecretStr | None = Field(default=None, alias="CLICKHOUSE_PASSWORD")
-
     skills_root: Path = Field(default=Path("skills/"), alias="SKILLS_ROOT")
     cache_ttl_seconds: int = Field(default=300, alias="CACHE_TTL_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

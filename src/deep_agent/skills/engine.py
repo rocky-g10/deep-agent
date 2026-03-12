@@ -10,7 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from deep_agent.models import SkillContent, SkillSummary, TenantContext
+from deep_agent.models import SkillContent, SkillSummary
+from deep_agent.models.skills import AgentSkillBindings
 from deep_agent.skills.parser import parse_skill_file
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9_]+")
@@ -25,7 +26,7 @@ class Clock(Protocol):
 
 
 class SkillNotFoundError(KeyError):
-    """Raised when a skill is missing or inaccessible for a tenant."""
+    """Raised when a skill is missing or not bound to the requesting agent."""
 
 
 class SkillEngine:
@@ -47,9 +48,9 @@ class SkillEngine:
         self._last_scan_at = 0.0
         self._skills_index: dict[str, SkillContent] = {}
 
-    def discover(self, tenant: TenantContext) -> list[SkillSummary]:
-        """Return skills visible to the tenant from common and tenant-specific directories."""
-        visible = self._visible_skills(tenant)
+    def discover(self, bindings: AgentSkillBindings) -> list[SkillSummary]:
+        """Return skills bound to the agent."""
+        bound = self._bound_skills(bindings)
         return [
             SkillSummary(
                 skill_id=skill.skill_id,
@@ -57,15 +58,15 @@ class SkillEngine:
                 description=skill.description,
                 tags=skill.tags,
             )
-            for skill in visible
+            for skill in bound
         ]
 
-    def match(self, query: str, tenant: TenantContext, top_k: int = 5) -> list[SkillSummary]:
+    def match(self, query: str, bindings: AgentSkillBindings, top_k: int = 5) -> list[SkillSummary]:
         """Return top matching skills ranked by tag overlap with query tokens."""
-        visible = self._visible_skills(tenant)
+        bound = self._bound_skills(bindings)
         query_tokens = _tokenize(query)
         scored: list[tuple[float, SkillContent]] = [
-            (_score_skill(skill=skill, query_tokens=query_tokens), skill) for skill in visible
+            (_score_skill(skill=skill, query_tokens=query_tokens), skill) for skill in bound
         ]
         scored.sort(key=lambda item: (-item[0], item[1].skill_id))
         top = scored[:top_k] if top_k > 0 else []
@@ -83,26 +84,26 @@ class SkillEngine:
         logger.debug("Matched %d skills for query (top_k=%d)", len(result), top_k)
         return result
 
-    def load(self, skill_id: str, tenant: TenantContext) -> SkillContent:
-        """Return full skill content for a visible skill ID."""
+    def load(self, skill_id: str, bindings: AgentSkillBindings) -> SkillContent:
+        """Return full skill content for a bound skill ID."""
         self._ensure_cache()
         with self._lock:
             skill = self._skills_index.get(skill_id)
 
-        if skill is None or not _is_visible_to_tenant(skill=skill, tenant=tenant):
-            logger.debug("Skill '%s' not found for tenant '%s'", skill_id, tenant.tenant_id)
+        if skill is None or not _is_bound_to_agent(skill_id=skill_id, bindings=bindings):
+            logger.debug("Skill '%s' not bound to agent '%s'", skill_id, bindings.agent_id)
             raise SkillNotFoundError(
-                f"Skill '{skill_id}' not found for tenant '{tenant.tenant_id}'"
+                f"Skill '{skill_id}' not found or not bound to agent '{bindings.agent_id}'"
             )
         return skill
 
-    def _visible_skills(self, tenant: TenantContext) -> list[SkillContent]:
+    def _bound_skills(self, bindings: AgentSkillBindings) -> list[SkillContent]:
         self._ensure_cache()
         with self._lock:
             skills = [
                 skill
                 for skill in self._skills_index.values()
-                if _is_visible_to_tenant(skill=skill, tenant=tenant)
+                if _is_bound_to_agent(skill_id=skill.skill_id, bindings=bindings)
             ]
         return sorted(skills, key=lambda skill: skill.skill_id)
 
@@ -137,8 +138,8 @@ class SkillEngine:
         return index
 
 
-def _is_visible_to_tenant(skill: SkillContent, tenant: TenantContext) -> bool:
-    return skill.tenant == "common" or skill.tenant == tenant.tenant_id
+def _is_bound_to_agent(skill_id: str, bindings: AgentSkillBindings) -> bool:
+    return skill_id in bindings.bound_skill_ids
 
 
 def _tokenize(query: str) -> set[str]:

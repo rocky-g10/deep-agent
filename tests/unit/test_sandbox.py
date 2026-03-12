@@ -125,22 +125,6 @@ async def test_cleanup_nonexistent_id_is_noop() -> None:
 
 
 @pytest.mark.timeout(10)
-async def test_execute_stubs_pythonpath() -> None:
-    """stubs_path should allow importing firm.stats inside sandbox."""
-    sandbox = PythonSubprocessSandbox(stubs_path=Path("stubs").resolve())
-    code = """
-from firm.stats import zscore, moving_avg
-print(callable(zscore), callable(moving_avg))
-"""
-
-    result = await sandbox.execute(code)
-
-    assert result.exit_code == 0
-    assert "True True" in result.stdout
-    await sandbox.cleanup(result.execution_id)
-
-
-@pytest.mark.timeout(10)
 async def test_files_in_path_traversal_blocked() -> None:
     """files_in entries must not escape the sandbox directory."""
     sandbox = PythonSubprocessSandbox()
@@ -212,4 +196,31 @@ print(os.environ.get('CH_EQUITIES_HOST', 'MISSING'))
     assert lines[0] == "MISSING"
     assert lines[1] != "/evil"
     assert lines[2] == "safe-host"
+    await sandbox.cleanup(result.execution_id)
+
+
+@pytest.mark.timeout(10)
+async def test_resource_prefix_env_var_injection() -> None:
+    """RESOURCE_ prefixed env vars should be allowed into sandbox."""
+    sandbox = PythonSubprocessSandbox()
+    code = """
+import os
+print(os.environ.get('RESOURCE_API_KEY', 'MISSING'))
+print(os.environ.get('KDB_HOST', 'MISSING'))
+print(os.environ.get('API_TOKEN', 'MISSING'))
+"""
+
+    result = await sandbox.execute(
+        code,
+        env={
+            "RESOURCE_API_KEY": "res-key-123",
+            "KDB_HOST": "kdb-host.local",
+            "API_TOKEN": "api-tok-456",
+        },
+    )
+
+    lines = result.stdout.strip().splitlines()
+    assert lines[0] == "res-key-123"
+    assert lines[1] == "kdb-host.local"
+    assert lines[2] == "api-tok-456"
     await sandbox.cleanup(result.execution_id)
