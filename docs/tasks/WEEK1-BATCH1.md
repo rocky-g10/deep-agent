@@ -28,7 +28,7 @@ Plus all `__init__.py` files for subpackages:
 - `src/deep_agent/skills/`
 - `src/deep_agent/runtime/`
 - `src/deep_agent/sandbox/`
-- `src/deep_agent/database/`
+- `src/deep_agent/database/`      # example code, not core framework
 - `src/deep_agent/tools/`
 - `src/deep_agent/mcp/`
 - `src/deep_agent/orchestrator/`
@@ -43,14 +43,13 @@ Use `pydantic-settings` `BaseSettings` with env prefix:
 class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-5"
-    clickhouse_host: str = "localhost"
-    clickhouse_port: int = 8123
-    clickhouse_database: str = "default"
-    clickhouse_user: str = "default"
-    clickhouse_password: str = ""
     skills_root: str = "skills/"
     sandbox_timeout: int = 60
     sandbox_max_memory_mb: int = 4096
+
+    # Resource env vars are example-specific, not core framework config.
+    # Skills define their own data sources. Example skills may use
+    # RESOURCE_ENV_* prefixed vars in tenant resource configuration.
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 ```
@@ -67,7 +66,6 @@ langgraph>=0.2
 langchain-openai>=0.2
 langchain-core>=0.3
 openai>=1.50
-clickhouse-connect>=0.7
 langchain-mcp-adapters>=0.1
 mcp>=1.0
 pydantic>=2.0
@@ -112,8 +110,9 @@ All shared types in `src/deep_agent/models/`. **Zero internal dependencies** —
 class TenantContext:
     tenant_id: str
     user_id: str
-    skills_dirs: list[str]
-    db_aliases: list[str]
+    skills_dirs: list[str]            # Legacy — may be empty when using agent skill bindings
+    db_aliases: list[str]             # Legacy — resource env vars configured per-tenant
+    resource_env: dict[str, dict[str, str]] | None = None  # Generic resource aliases → env var sets
 
     @classmethod
     def stub(cls) -> "TenantContext":
@@ -122,11 +121,19 @@ class TenantContext:
             user_id="dev-user",
             skills_dirs=["skills/common", "skills/equities"],
             db_aliases=["ch-equities"],
+            resource_env={
+                "ch-equities": {
+                    "DB_HOST": "localhost",
+                    "DB_PORT": "8123",
+                    "DB_NAME": "default",
+                    "DB_USER": "default",
+                },
+            },
         )
 ```
 
 **`models/skills.py`** — SkillSummary, SkillMetadata, SkillContent:
-- `SkillSummary`: skill_id, name, description, tags, tenant
+- `SkillSummary`: skill_id, name, description, tags (no tenant field — skills are tenant-unaware)
 - `SkillMetadata`: all frontmatter fields (name, description, version, tags, tenant, allowed_tools, inputs, quality)
 - `SkillContent`: metadata + body (full markdown content)
 
@@ -186,8 +193,8 @@ def parse_skill_file(path: Path, skills_root: Path | None = None) -> SkillConten
 
 ### Requirements
 1. Uses `python-frontmatter` to extract YAML frontmatter
-2. Required frontmatter fields: `name`, `description`, `version`, `tags`, `tenant`, `allowed-tools`
-3. `skill_id` derived from relative path: `skills/equities/zscore-monitor/SKILL.md` → `equities/zscore-monitor`
+2. Required frontmatter fields: `name`, `description`, `version`, `tags`, `allowed-tools` (note: `tenant` is NOT a required field — skills are tenant-unaware)
+3. `skill_id` derived from relative path: `skills/equities/zscore-monitor/SKILL.md` → `equities/zscore-monitor` (domain-based, not tenant-based)
 4. `body` = full markdown content after frontmatter
 5. `SkillParseError` is a custom exception (define in `skills/parser.py` or a shared `exceptions.py`)
 6. Edge cases handled: empty body, missing frontmatter delimiters, extra frontmatter fields (ignored)

@@ -2,7 +2,7 @@
 
 > **Reference:** `docs/IMPLEMENTATION_PLAN.md` — Week 2 section
 > **Depends on:** T1.1–T1.6 (complete — scaffolding, models, skills engine all in place)
-> **Scope:** LLM routing, runtime adapter protocol, LangGraph integration, sandbox execution, firm.stats stubs, unit tests
+> **Scope:** LLM routing, runtime adapter protocol, LangGraph integration, sandbox execution, firm_stats skill-bundled script, unit tests
 
 ---
 
@@ -403,20 +403,21 @@ class PythonSubprocessSandbox:
 
     Spawns `python3 code.py` in a temp directory with resource limits,
     timeout enforcement, and output file collection.
+
+    The sandbox provides minimal Python 3.12 + pip. Skills declare their
+    dependencies in `scripts/requirements.txt`; the sandbox installs them
+    at execution time (with per-skill caching).
     """
 
     def __init__(
         self,
-        stubs_path: Path | None = None,
         max_tracked: int = 100,
     ) -> None:
         """Initialize sandbox.
 
         Args:
-            stubs_path: Path to stubs/ directory for PYTHONPATH injection.
             max_tracked: Maximum number of tracked executions before auto-eviction.
         """
-        self._stubs_path = stubs_path
         self._max_tracked = max_tracked
         self._executions: dict[str, Path] = {}
         self._lock = threading.Lock()
@@ -456,7 +457,7 @@ class PythonSubprocessSandbox:
 6. Write `code.py` to temp dir
 7. Build subprocess environment:
    - Start with `os.environ.copy()` (inherit base env)
-   - If `self._stubs_path`, prepend to `PYTHONPATH`
+   - Skill scripts directory (if provided via `files_in`) is added to `PYTHONPATH`
    - Merge in `env` dict (user-provided vars override)
 8. Record start time
 9. Spawn: `asyncio.create_subprocess_exec("python3", "code.py", cwd=tmp_dir, env=sub_env, stdout=PIPE, stderr=PIPE)`
@@ -493,7 +494,7 @@ class PythonSubprocessSandbox:
 4. Timeout kills the process and returns non-zero exit code with timeout info in stderr
 5. Memory limit is enforced via `resource.RLIMIT_AS` preamble
 6. Files written to `output/` appear in `ExecuteResult.output_files` (base64-encoded)
-7. `stubs/` directory added to `PYTHONPATH` so sandbox code can `import firm.stats`
+7. Skill scripts (provided via `files_in` or `env`) are accessible to sandbox code
 8. `files_in` content is written to temp dir before execution
 
 ### Edge Cases
@@ -508,25 +509,25 @@ class PythonSubprocessSandbox:
 
 ---
 
-## T2.5 — firm.stats Stubs
+## T2.5 — firm_stats Skill-Bundled Script
 
-Stub implementation of `firm.stats` with real math using pandas. Sandbox code can `import firm.stats` when `stubs/` is on `PYTHONPATH`.
+Implementation of `firm_stats` module with real math using pandas. This is a **skill-bundled script** inside `skills/equities/zscore-monitor/scripts/firm_stats.py` per the Anthropic AgentSkills spec. Sandbox code does `from firm_stats import zscore, moving_avg` (the skill's `scripts/` directory is on `PYTHONPATH`).
 
 ### Files
 
 | File | Action | Purpose |
 |------|--------|---------|
-| `stubs/firm/__init__.py` | Create | Package marker |
-| `stubs/firm/stats.py` | Create | `zscore()`, `moving_avg()` implementations |
+| `skills/equities/zscore-monitor/scripts/firm_stats.py` | Create | `zscore()`, `moving_avg()` implementations |
+| `skills/equities/zscore-monitor/scripts/requirements.txt` | Create | Skill dependencies (pandas, numpy, etc.) |
 
 ### Interface
 
 ```python
-# stubs/firm/stats.py
-"""Stub implementation of firm.stats with real math.
+# skills/equities/zscore-monitor/scripts/firm_stats.py
+"""Skill-bundled implementation of firm_stats with real math.
 
 Provides rolling statistical functions for financial data analysis.
-Usage: Add stubs/ to PYTHONPATH, then `from firm.stats import zscore, moving_avg`.
+Usage: The skill's scripts/ directory is on PYTHONPATH; `from firm_stats import zscore, moving_avg`.
 """
 from __future__ import annotations
 
@@ -578,20 +579,15 @@ def zscore(series: pd.Series, window: int) -> pd.Series:
 - Window larger than series length → all `NaN` (native pandas behavior with `min_periods=window`)
 - Empty series → empty series returned
 
-### `stubs/firm/__init__.py`
-
-```python
-"""Stub implementation of the firm internal library."""
-```
-
 ### Connections to Week 2
 
-- Used by `PythonSubprocessSandbox` (T2.4) via `PYTHONPATH` injection
+- Bundled inside `skills/equities/zscore-monitor/scripts/` per Anthropic AgentSkills spec
 - Referenced in `skills/equities/zscore-monitor/SKILL.md` instructions (T1.5)
+- Sandbox makes the skill's `scripts/` directory available on `PYTHONPATH`
 
 ### Acceptance Criteria
 
-1. `from firm.stats import zscore, moving_avg` works when `stubs/` is on `PYTHONPATH`
+1. `from firm_stats import zscore, moving_avg` works when the skill's `scripts/` dir is on `PYTHONPATH`
 2. `moving_avg(series, window)` computes rolling mean via `pandas.Series.rolling().mean()`
 3. `zscore(series, window)` computes `(x - rolling_mean) / rolling_std`
 4. Both accept `pandas.Series` and return `pandas.Series`
@@ -610,7 +606,7 @@ def zscore(series: pd.Series, window: int) -> pd.Series:
 
 ## T2.6 — Unit Tests for Runtime and Sandbox
 
-Comprehensive tests for LLMRouter, LangGraphAdapter (mocked), PythonSubprocessSandbox, and firm.stats.
+Comprehensive tests for LLMRouter, LangGraphAdapter (mocked), PythonSubprocessSandbox, and firm_stats.
 
 ### Files
 
@@ -619,7 +615,7 @@ Comprehensive tests for LLMRouter, LangGraphAdapter (mocked), PythonSubprocessSa
 | `tests/unit/test_llm_router.py` | Create | LLMRouter tests |
 | `tests/unit/test_sandbox.py` | Create | PythonSubprocessSandbox tests |
 | `tests/unit/test_langgraph_adapter.py` | Create | LangGraphAdapter tests (mocked LLM) |
-| `tests/unit/test_firm_stats.py` | Create | firm.stats stub tests |
+| `tests/unit/test_firm_stats.py` | Create | firm_stats skill-bundled script tests |
 
 ### test_llm_router.py
 
@@ -682,11 +678,11 @@ async def test_cleanup_nonexistent_id_is_noop() -> None:
     """cleanup('nonexistent') does not raise."""
 
 @pytest.mark.timeout(10)
-async def test_execute_stubs_pythonpath() -> None:
-    """Code does 'from firm.stats import zscore' with stubs_path set → succeeds."""
+async def test_execute_skill_scripts_available() -> None:
+    """Code can import scripts provided via files_in."""
 ```
 
-**Patterns:** Use `pytest.mark.timeout()` to prevent hanging. Use real subprocess execution (not mocked). Construct `PythonSubprocessSandbox(stubs_path=Path("stubs/"))` with real stubs path.
+**Patterns:** Use `pytest.mark.timeout()` to prevent hanging. Use real subprocess execution (not mocked). Construct `PythonSubprocessSandbox()` — no stubs_path needed; skill scripts are provided via `files_in`.
 
 ### test_langgraph_adapter.py
 
@@ -725,8 +721,8 @@ def test_fallback_to_create_react_agent() -> None:
 ### test_firm_stats.py
 
 ```python
-# Tests for stubs/firm/stats.py
-# Note: add stubs/ to sys.path in conftest or at module level
+# Tests for skills/equities/zscore-monitor/scripts/firm_stats.py
+# Note: add the skill's scripts/ dir to sys.path in conftest or at module level
 
 import pandas as pd
 
@@ -752,7 +748,7 @@ def test_zscore_nan_propagation() -> None:
     """Series with NaN → NaN propagates in rolling window."""
 ```
 
-**Patterns:** Use `pd.testing.assert_series_equal()` for floating-point comparisons. Add `stubs/` to `sys.path` at test module level or via conftest fixture.
+**Patterns:** Use `pd.testing.assert_series_equal()` for floating-point comparisons. Add the skill's `scripts/` directory to `sys.path` at test module level or via conftest fixture.
 
 ### conftest.py Updates
 
@@ -762,10 +758,10 @@ Add to `tests/conftest.py`:
 import sys
 from pathlib import Path
 
-# Make stubs/ importable for firm.stats tests
-_stubs_dir = Path(__file__).resolve().parent.parent / "stubs"
-if str(_stubs_dir) not in sys.path:
-    sys.path.insert(0, str(_stubs_dir))
+# Make zscore-monitor skill's scripts/ importable for firm_stats tests
+_scripts_dir = Path(__file__).resolve().parent.parent / "skills" / "equities" / "zscore-monitor" / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
 ```
 
 ### Acceptance Criteria
@@ -775,14 +771,14 @@ if str(_stubs_dir) not in sys.path:
 3. LLMRouter: resolve correct model, config override, task_hint ignored
 4. Sandbox: simple execution, file output, timeout, error handling, env vars, files_in, cleanup, stubs PYTHONPATH
 5. LangGraphAdapter: mocked LLM — no real OpenAI calls; correct event types
-6. firm.stats: rolling mean, z-score, edge cases (empty, window, NaN)
+6. firm_stats: rolling mean, z-score, edge cases (empty, window, NaN)
 7. Tests are independent (no shared mutable state)
 
 ### Edge Cases Tested
 
 - Sandbox timeout with `pytest.mark.timeout` safety net
 - Concurrent sandbox executions (covered by thread-safe `_lock`)
-- Empty/NaN series in firm.stats
+- Empty/NaN series in firm_stats
 - Missing `deepagents` package → fallback path in adapter
 
 ---
@@ -795,7 +791,7 @@ if str(_stubs_dir) not in sys.path:
 4. **Docstrings** on all public classes and methods
 5. **One concern per file** — protocol separate from implementation
 6. **Async-first** — `invoke()`, `stream()`, `execute()`, `cleanup()` are all async
-7. **Dependency injection** — `LLMRouter` takes `AppSettings`; `PythonSubprocessSandbox` takes `stubs_path`
+7. **Dependency injection** — `LLMRouter` takes `AppSettings`; `PythonSubprocessSandbox` is minimal (no stubs_path)
 
 ---
 
@@ -804,12 +800,12 @@ if str(_stubs_dir) not in sys.path:
 After all implementation, run:
 ```bash
 source .venv/bin/activate
-ruff check src/ tests/ stubs/
+ruff check src/ tests/ skills/
 mypy src/
 pytest tests/unit/ -v
 python -c "from deep_agent.runtime import LLMRouter, RuntimeAdapter, LangGraphAdapter; print('runtime OK')"
 python -c "from deep_agent.sandbox import SandboxManager, PythonSubprocessSandbox; print('sandbox OK')"
-PYTHONPATH=stubs python -c "from firm.stats import zscore, moving_avg; print('stubs OK')"
+PYTHONPATH=skills/equities/zscore-monitor/scripts python -c "from firm_stats import zscore, moving_avg; print('skill scripts OK')"
 ```
 
 All must pass cleanly.

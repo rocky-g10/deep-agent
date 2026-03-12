@@ -134,11 +134,13 @@ Move `_SANDBOX_ENV_ALLOWLIST` to module level (above the class). Keep the rest o
 
 ---
 
-## FIX-4: `_build_db_env` overwrites env vars per alias
+## FIX-4: `_build_db_env` overwrites env vars per alias (example skill helper)
 
 **Severity:** CRITICAL
 
 **File:** `src/deep_agent/tools/execute_code.py`
+
+> **Context:** `_build_db_env` is part of the example skill infrastructure (see PRD §4.3 Resource Configuration). In the resource-agnostic architecture, tenant resource env vars are injected generically. This fix applies to the example code that ships with the example skills.
 
 **Problem:** Lines 58-68 — The `for` loop over `db_registry.list_aliases()` overwrites `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` on each iteration. For multi-database tenants, only the last alias's connection info survives.
 
@@ -187,7 +189,7 @@ Note: `_extract_db_pass` is defined in FIX-5 below — implement both together.
 
 ---
 
-## FIX-5: `DB_PASS` is always empty string
+## FIX-5: `DB_PASS` is always empty string (example skill helper)
 
 **Severity:** CRITICAL
 
@@ -280,7 +282,10 @@ def _collect_output_files(output_dir: Path) -> dict[str, str]:
 **Fix:** Allowlist env var prefixes that `env_overrides` may set:
 
 ```python
-_ALLOWED_ENV_PREFIXES = ("DB_", "CH_", "PG_", "REDIS_", "MONGO_")
+# Configurable — not limited to database-specific prefixes.
+# In the resource-agnostic architecture, any RESOURCE_* prefix
+# or deployer-configured prefix may be added.
+_ALLOWED_ENV_PREFIXES = ("DB_", "CH_", "PG_", "REDIS_", "MONGO_", "RESOURCE_")
 
 # In _build_process_env, replace lines 124-125:
 if env_overrides:
@@ -302,11 +307,13 @@ Move `_ALLOWED_ENV_PREFIXES` to module level.
 
 ---
 
-## FIX-8: `get_connection` hardcodes `engine="clickhouse"`
+## FIX-8: `get_connection` hardcodes `engine="clickhouse"` (example code)
 
 **Severity:** IMPORTANT
 
 **File:** `src/deep_agent/database/registry.py`
+
+> **Context:** `DatabaseRegistry` is example code, not core framework (see PRD §4.3). This fix improves the example.
 
 **Problem:** Line 78 — `get_connection` always returns `engine="clickhouse"` instead of using `entry.engine` from the looked-up `_ALIASES` dict entry. The result of `_get_accessible_alias` on line 75 is discarded.
 

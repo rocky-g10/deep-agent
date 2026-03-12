@@ -17,7 +17,9 @@
 
 ---
 
-## T3.1 — DatabaseRegistry (ClickHouse)
+## T3.1 — DatabaseRegistry (Example Code, Not Core Framework)
+
+> **Note:** The framework is resource-agnostic (see PRD §4.3). `DatabaseRegistry` is **example code** that demonstrates the resource env-var injection pattern. The core framework provides generic resource configuration via tenant config — `DatabaseRegistry` is a convenience wrapper shipped with the example skills. In a production deployment, tenants configure generic resource aliases as key-value env var sets; the sandbox injects these at runtime.
 
 Implement `DatabaseRegistry` with a single hardcoded ClickHouse alias (`ch-equities`). The registry provides schema metadata (table/column definitions) and connection configuration resolved from `AppSettings`. Phase 1 hardcodes the schema rather than querying ClickHouse's `system.columns` table — the metadata is baked into code for deterministic offline operation. Tenant scoping is enforced: only aliases listed in `TenantContext.db_aliases` are accessible.
 
@@ -245,9 +247,10 @@ def create_execute_code_tool(
     async def execute_code(code: str, timeout: int = 60) -> str:
         """Execute Python code in a sandboxed environment.
 
-        The sandbox has access to database connection environment variables
-        (DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME) and the firm.stats
-        library. Save output files (charts, CSVs) to the output/ directory.
+        The sandbox has access to resource environment variables injected
+        from tenant resource configuration (e.g., DB_HOST, DB_PORT, DB_USER,
+        DB_PASS, DB_NAME). Skills bundle their own scripts in scripts/.
+        Save output files (charts, CSVs) to the output/ directory.
 
         Args:
             code: Python source code to execute.
@@ -335,7 +338,9 @@ def _build_db_env(db_registry: DatabaseRegistry, tenant: TenantContext) -> dict[
 
 ---
 
-## T3.3 — query_database Tool
+## T3.3 — query_database Tool (Example Tool)
+
+> **Note:** `query_database` is an **example tool** that ships with the example skills. It demonstrates how skills can expose database metadata. In the resource-agnostic architecture, skills define their own data discovery patterns.
 
 LangChain-compatible tool providing database schema discovery. Uses the same factory/closure pattern as `execute_code` to inject `DatabaseRegistry` and `TenantContext`. The tool supports two actions: `list_aliases` (enumerate available databases) and `get_schema` (retrieve table/column metadata for a specific alias). This is metadata-only — no query execution. The agent uses this tool to understand database structure before writing code.
 
@@ -531,8 +536,9 @@ class AgentOrchestrator:
         llm_router: LLMRouter,
         runtime: RuntimeAdapter,
         sandbox: SandboxManager,
-        db_registry: DatabaseRegistry,
+        db_registry: DatabaseRegistry | None = None,
         mcp_manager: MCPManager | None = None,
+        skill_bindings: list[str] | None = None,
     ) -> None:
         """Initialize orchestrator with all required services.
 
@@ -541,8 +547,9 @@ class AgentOrchestrator:
             llm_router: Router for resolving LLM configuration.
             runtime: RuntimeAdapter for agent creation and streaming.
             sandbox: SandboxManager for code execution.
-            db_registry: DatabaseRegistry for database metadata and connections.
+            db_registry: Optional DatabaseRegistry (example code) for database metadata.
             mcp_manager: Optional MCPManager for MCP tool discovery.
+            skill_bindings: Optional list of skill_ids this agent may use (agent-scoped discovery).
         """
 
     async def handle_message(
@@ -604,6 +611,9 @@ async def handle_message(
     try:
         # 1. Match skills
         matched_skills = self._skill_engine.match(message, context, top_k=1)
+        # Note: In scoped discovery, skill_bindings filter is applied by the
+        # skill engine. The orchestrator receives agent-scoped skill bindings,
+        # not global tenant skills_dirs.
         skill_content = None
         allowed_tools: list[str] | None = None
 
@@ -659,6 +669,7 @@ async def handle_message(
 def _build_builtin_tools(self, context: TenantContext) -> list[Any]:
     """Create the standard built-in tools with injected dependencies."""
     tools: list[Any] = []
+    # execute_code is always available (core framework tool)
     tools.append(
         create_execute_code_tool(
             sandbox=self._sandbox,
@@ -666,12 +677,14 @@ def _build_builtin_tools(self, context: TenantContext) -> list[Any]:
             tenant=context,
         )
     )
-    tools.append(
-        create_query_database_tool(
-            db_registry=self._db_registry,
-            tenant=context,
+    # query_database is an example tool — only available when db_registry is provided
+    if self._db_registry is not None:
+        tools.append(
+            create_query_database_tool(
+                db_registry=self._db_registry,
+                tenant=context,
+            )
         )
-    )
     return tools
 ```
 
@@ -803,9 +816,9 @@ def _build_system_prompt(
 
 ---
 
-## T3.5 — Unit Tests for DatabaseRegistry, Tools, and Orchestrator
+## T3.5 — Unit Tests for DatabaseRegistry (Example), Tools, and Orchestrator
 
-Comprehensive unit tests covering the `DatabaseRegistry`, tool factories (`execute_code`, `query_database`), and the `AgentOrchestrator`. All tests use mocked dependencies — no real LLM calls, no real sandbox execution, no real database connections.
+Comprehensive unit tests covering the `DatabaseRegistry` (example code), tool factories (`execute_code`, `query_database`), and the `AgentOrchestrator`. All tests use mocked dependencies — no real LLM calls, no real sandbox execution, no real database connections. Note that `DatabaseRegistry` and `query_database` are example code demonstrating the resource-agnostic pattern, not core framework components.
 
 ### Files
 
@@ -2149,7 +2162,7 @@ After all Week 3 implementation, run:
 source .venv/bin/activate
 
 # Lint and type checks
-ruff check src/ tests/ stubs/
+ruff check src/ tests/ skills/
 mypy src/
 
 # Unit tests

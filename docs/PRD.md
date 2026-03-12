@@ -33,11 +33,14 @@ Deep Agent is an enterprise-grade, reusable AI agent framework designed for a la
 - **Swappable runtime** — the `RuntimeAdapter` protocol decouples skill definitions from execution engines, future-proofing the platform.
 - **Provider-agnostic LLM routing** — ships with OpenAI GPT-5 / GPT-4.1 as the default provider, with a routing layer designed for zero-downtime swap to Claude, Gemini, or any future model.
 - **On-premise deployment** — runs on self-hosted Kubernetes or OpenShift clusters behind the firm's network perimeter, meeting regulatory and data-residency requirements.
+- **Resource-agnostic** — the framework does not bake in any specific database or data source. Skills define their own data sources; the platform provides secure sandbox execution and generic resource env-var injection.
+- **Self-contained skills (Anthropic AgentSkills spec)** — each skill is a self-contained directory with `scripts/`, `references/`, and `assets/` folders. Skills bundle their own code and declare their own dependencies via `scripts/requirements.txt`.
+- **Scoped skill discovery** — a simplified two-layer model (Global Skill Registry → Agent Skill Bindings) replaces tenant-scoped skill directories. Skills are tenant-unaware and agent-unaware; access control is purely at the agent level.
 
 **MVP priority order:**
 
 1. Skills engine (discovery, matching, loading)
-2. Database querying with code sandbox (agent writes and executes Python against ClickHouse, Redis, MongoDB, MySQL)
+2. Secure code sandbox — skills execute Python against any data source they define
 3. MCP tool integrations
 
 ---
@@ -124,13 +127,15 @@ A single platform where:
                                │
 ┌──────────────────────────────▼──────────────────────────────────────┐
 │                     INTEGRATION LAYER                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ DB Connectors│  │ MCP Adapters │  │ Internal Lib Registry    │  │
-│  │ ClickHouse   │  │ (per-tenant  │  │ risk analytics, pricing, │  │
-│  │ Redis        │  │  JSON config)│  │ stats (z-score, WAM,     │  │
-│  │ MongoDB      │  │              │  │ PCA, moving avg),        │  │
-│  │ MySQL        │  │              │  │ swap notionals           │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────────┘  │
+│  ┌──────────────────────────┐  ┌──────────────┐                   │
+│  │ Skill-Defined Data       │  │ MCP Adapters │                   │
+│  │ Sources (any DB, API,    │  │ (per-tenant  │                   │
+│  │ file system — skill-     │  │  JSON config)│                   │
+│  │ managed)                 │  │              │                   │
+│  └──────────────────────────┘  └──────────────┘                   │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Skill-Bundled Scripts (per Anthropic AgentSkills spec)       │  │
+│  └──────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────────────┐
@@ -146,7 +151,7 @@ A single platform where:
 ┌──────────────────────────────▼──────────────────────────────────────┐
 │                    INFRASTRUCTURE LAYER                             │
 │  Self-hosted K8s / OpenShift  │  PostgreSQL  │  Redis  │  S3/Minio │
-│  OAuth/OIDC (pluggable)       │  ClickHouse  │  Vault  │  ELK/Loki │
+│  OAuth/OIDC (pluggable)       │  Vault       │  ELK/Loki           │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -244,8 +249,8 @@ User (React portal)
   │                  ├─ RuntimeAdapter.stream(agent, user_message, ctx)
   │                  │     │
   │                  │     ├─ LLM call (GPT-5 via LLM Router)
-  │                  │     ├─ Tool call: query_database(sql, alias="ch-equities")
-  │                  │     │     └─ DatabaseRegistry resolves alias → connection
+  │                  │     ├─ Tool call: execute_code(python_code)
+  │                  │     │     └─ Sandbox injects tenant resource env vars
   │                  │     │     └─ SandboxManager.execute(python_code)
   │                  │     │     └─ Returns DataFrame / chart image
   │                  │     ├─ LLM call (interpret results)
@@ -261,9 +266,23 @@ User (React portal)
 
 ## 4. Core Components
 
-### 4.1 SkillEngine
+### 4.1 SkillEngine (Global Skill Registry + Scoped Discovery)
 
-The SkillEngine is the central component of the Skills Layer. It owns the full lifecycle of skill discovery, matching, and loading — and has **zero dependency** on any runtime or LLM provider.
+The SkillEngine is the central component of the Skills Layer. It functions as a **Global Skill Registry**, indexing all skill folders by YAML frontmatter. It has **zero dependency** on any runtime or LLM provider. Skills are **tenant-unaware** and **agent-unaware** — access control is purely at the agent level through skill bindings.
+
+#### Discovery Pipeline (Two Layers)
+
+```
+SkillRegistry.index_all()          ← Layer 1: Global index of all skills
+    │
+    ▼
+Agent Skill Bindings filter        ← Layer 2: Agent config binds specific skill_ids
+    │
+    ▼
+match(query) against bound skills  ← Runtime: tag/keyword matching on the filtered set
+```
+
+There is **no tenant-level skill allowlist**. All skills in the global registry are available to any tenant. The agent configuration determines which skills are accessible.
 
 #### Interface
 
@@ -271,37 +290,52 @@ The SkillEngine is the central component of the Skills Layer. It owns the full l
 class SkillEngine:
     def __init__(self, skills_root: Path, cache_ttl: int = 300): ...
 
-    def discover(self, tenant: TenantContext) -> list[SkillSummary]:
-        """Return name + description for all skills visible to this tenant.
+    def discover(self, skill_bindings: list[str] | None = None) -> list[SkillSummary]:
+        """Return name + description for all skills, optionally filtered by agent skill bindings.
         Results are injected into the system prompt so the LLM knows what's available."""
 
-    def match(self, query: str, tenant: TenantContext, top_k: int = 5) -> list[SkillMetadata]:
-        """Rank skills by relevance to the user query.
+    def match(self, query: str, skill_bindings: list[str] | None = None, top_k: int = 5) -> list[SkillMetadata]:
+        """Rank skills by relevance to the user query, scoped to bound skills.
         MVP: tag + keyword matching. Future: embedding-based similarity."""
 
-    def load(self, skill_id: str, tenant: TenantContext) -> SkillContent:
-        """Return full SKILL.md content for system-prompt injection."""
+    def load(self, skill_id: str) -> SkillContent:
+        """Return full SKILL.md content for system-prompt injection.
+        No tenant check — skills are globally accessible."""
 ```
+
+#### Agent Skill Bindings
+
+Each agent configuration specifies a list of `skill_id`s that the agent may use. This is the **only** access-control mechanism for skills:
+
+```python
+@dataclass
+class AgentSkillBindings:
+    agent_id: str
+    bound_skill_ids: list[str]   # e.g. ["data-query/db-query", "equities/zscore-monitor"]
+```
+
+The orchestrator receives agent-scoped skill bindings and passes them to `discover()` and `match()`.
 
 #### Data Types
 
 ```python
 @dataclass
 class SkillSummary:
-    skill_id: str          # e.g. "equities/query-fundamentals"
+    skill_id: str          # e.g. "equities/zscore-monitor"
     name: str              # human-readable name from frontmatter
     description: str       # one-line description
     tags: list[str]        # e.g. ["database", "equities", "fundamentals"]
 
 @dataclass
 class SkillMetadata(SkillSummary):
-    allowed_tools: list[str]   # e.g. ["query_database", "execute_code", "plot_chart"]
-    tenant: str                # owning tenant, or "common"
+    allowed_tools: list[str]   # e.g. ["execute_code"]
 
 @dataclass
 class SkillContent(SkillMetadata):
     body: str              # full Markdown body (instructions, examples, quality standards)
 ```
+
+Note: The `tenant` field is **removed** from all skill data types. Skills are tenant-unaware.
 
 #### Progressive Disclosure
 
@@ -315,23 +349,42 @@ Skills are exposed to the LLM in three tiers to minimize prompt bloat:
 
 #### File Layout
 
+Skills are organized by domain, not tenant ownership:
+
 ```
 skills/
-├── common/                        # shared across all tenants
-│   ├── db-query/SKILL.md
-│   └── visualization/SKILL.md
-├── equities/                      # equities desk tenant
-│   ├── query-fundamentals/SKILL.md
-│   └── zscore-monitor/SKILL.md    # reference example (§5)
+├── data-query/                    # general data querying skills
+│   ├── db-query/
+│   │   ├── SKILL.md
+│   │   ├── scripts/
+│   │   │   └── requirements.txt
+│   │   ├── references/
+│   │   └── assets/
+│   └── visualization/
+│       ├── SKILL.md
+│       └── scripts/
+├── equities/                      # equities domain skills
+│   ├── zscore-monitor/
+│   │   ├── SKILL.md
+│   │   ├── scripts/
+│   │   │   ├── requirements.txt
+│   │   │   └── firm_stats.py
+│   │   ├── references/
+│   │   └── assets/
+│   └── query-fundamentals/
+│       └── SKILL.md
 ├── fixed-income/
-│   └── swap-notional-calc/SKILL.md
+│   └── swap-notional-calc/
+│       └── SKILL.md
 ├── risk/
-│   └── var-report/SKILL.md
+│   └── var-report/
+│       └── SKILL.md
 └── compliance/
-    └── trade-surveillance/SKILL.md
+    └── trade-surveillance/
+        └── SKILL.md
 ```
 
-Skills in `common/` are visible to all tenants. Desk-specific directories are visible only to their owning tenant and to `platform_admin` users.
+All skills are globally visible. Agent configurations bind specific skills to specific agents.
 
 ---
 
@@ -377,70 +430,60 @@ class ExecuteResult:
 | Subprocess | `PythonSubprocessSandbox` | Local dev, MVP | Spawns a Python subprocess with `resource` limits, temp directory for output files. No container runtime required. |
 | OpenShift Pod | `OpenShiftPodSandbox` | Production | Creates an ephemeral Pod via K8s API. Non-root user, read-only rootfs, CPU/memory limits, network policy restricts egress to approved DB endpoints only. Pod is destroyed after execution. |
 
+#### Sandbox Image
+
+The sandbox provides a minimal **Python 3.12-slim + pip** base image. Skills declare their dependencies in `scripts/requirements.txt`; the sandbox installs them at execution time (with per-skill caching). No analytics libraries, database drivers, or internal firm libraries are pre-installed in the base image — all dependencies come from the skill's own requirements.
+
 #### Visualization Pipeline
 
-1. Agent generates Python code that uses `matplotlib` or `plotly`.
+1. Agent generates Python code that uses `matplotlib` or `plotly` (installed from the skill's `scripts/requirements.txt`).
 2. Code writes output to `/output/` inside the sandbox.
 3. `ExecuteResult.output_files` returns the rendered images (PNG/SVG) or interactive HTML.
 4. The Chat API encodes images as base64 data URIs and streams them to the React portal in a `tool_result` event.
 
 ---
 
-### 4.3 DatabaseRegistry
+### 4.3 Resource Configuration
 
-The DatabaseRegistry maps tenant-scoped **aliases** to connection configurations. The agent sees only metadata (alias, schema, table names, column types) — never raw credentials.
+The framework is **resource-agnostic** — it does not bake in any specific database engine, client library, or data-source connector. Instead, tenants configure **generic resource aliases** as key-value environment variable sets in their tenant configuration.
 
-#### Interface
+#### How It Works
+
+1. **Tenant config** defines named resource aliases with key-value env var pairs:
 
 ```python
-class DatabaseRegistry:
-    def list_aliases(self, tenant: TenantContext) -> list[DatabaseAlias]: ...
-    def get_metadata(self, alias: str, tenant: TenantContext) -> DatabaseMetadata: ...
-    def get_connection(self, alias: str, tenant: TenantContext) -> ConnectionConfig: ...
-
-@dataclass
-class DatabaseAlias:
-    alias: str             # e.g. "ch-equities"
-    engine: str            # "clickhouse" | "redis" | "mongodb" | "mysql"
-    description: str       # "Equities fundamentals — daily OHLCV, splits, dividends"
-
-@dataclass
-class DatabaseMetadata:
-    alias: str
-    engine: str
-    tables: list[TableMeta]   # table name, columns, types, row count estimate
-
-@dataclass
-class ConnectionConfig:
-    engine: str
-    host: str
-    port: int
-    database: str
-    credentials_ref: str   # reference to secret store — NOT raw password
+# In tenant config (PostgreSQL / admin API)
+resource_aliases:
+  ch-equities:
+    DB_HOST: "clickhouse.equities.internal"
+    DB_PORT: "8123"
+    DB_NAME: "equities_db"
+    DB_USER: "reader"
+    DB_PASS_REF: "vault:clickhouse/equities/password"
+  redis-pricing:
+    REDIS_URL: "redis://pricing-cache.internal:6379/0"
 ```
 
-#### Credential Flow
+2. **SandboxManager** injects these env vars into the sandbox process at execution time.
+3. **Skill code** references resources via `os.environ` — e.g., `os.environ["DB_HOST"]`.
+4. **No built-in database drivers, no engine-specific logic** in the framework core.
+
+#### Credential Flow (preserved, but generic)
 
 ```
 Secret Store (Vault / K8s Secrets)
     │
     ▼
-DatabaseRegistry.get_connection()  →  injects credentials into sandbox env vars
-    │                                    (DB_HOST, DB_PORT, DB_USER, DB_PASS)
+Tenant resource config  →  env var references resolved at runtime
+    │
     ▼
-Sandbox code uses env vars          →  agent code never sees raw credentials
+SandboxManager injects env vars into sandbox process
+    │
+    ▼
+Skill code uses os.environ["DB_HOST"] etc. — never sees raw credentials
 ```
 
-The agent's LLM prompt receives only `DatabaseAlias` and `DatabaseMetadata` (schema info). When the agent generates Python code that queries a database, the `SandboxManager` injects credentials as environment variables. The agent-generated code references `os.environ["DB_HOST"]` etc. — the LLM never sees the actual values.
-
-#### Supported Engines (MVP)
-
-| Engine | Client Library | Primary Use Case |
-|---|---|---|
-| ClickHouse | `clickhouse-connect` | Time-series analytics, fundamentals, market data |
-| Redis | `redis-py` | Caches, real-time pricing, session data |
-| MongoDB | `pymongo` | Document stores, trade blotters, config |
-| MySQL | `mysqlclient` | Reference data, static tables |
+The agent's LLM prompt receives only resource alias names and descriptions (not credentials). When the agent generates Python code, the `SandboxManager` injects credentials as environment variables. The agent-generated code references `os.environ` — the LLM never sees the actual values.
 
 ---
 
@@ -477,26 +520,11 @@ Per-tenant MCP config is a JSON file stored at `config/tenants/{tenant_id}/mcp.j
 3. Discovered tools are merged with skill-defined `allowed_tools` — a tool is only available to the agent if the matched skill permits it.
 4. Tools are passed to `RuntimeAdapter.create_agent()` alongside built-in tools (sandbox, DB query).
 
-#### Internal Library Registry
+#### Skill-Bundled Scripts
 
-The firm's internal Python libraries are wrapped as MCP tools or direct sandbox imports, registered through a **generic plugin registry**:
+Skills bundle their own code in `scripts/` per the **Anthropic AgentSkills spec**. There is no centralized Internal Library Registry. Each skill's `scripts/` directory contains the Python modules the skill needs, and `scripts/requirements.txt` declares third-party dependencies.
 
-```python
-class InternalLibRegistry:
-    def register(self, name: str, module_path: str, functions: list[str]) -> None: ...
-    def get_available(self, tenant: TenantContext) -> list[LibraryDescriptor]: ...
-```
-
-Registered libraries are pre-installed in the sandbox base image. Categories include:
-
-| Category | Example Functions | Library |
-|---|---|---|
-| Risk Analytics | VaR, CVaR, stress testing | `firm.risk` |
-| Pricing | Bond pricing, option Greeks, yield curves | `firm.pricing` |
-| Statistics | z-score, moving average, WAM, PCA | `firm.stats` |
-| Swap Notionals | Notional schedule generation, amortization | `firm.swaps` |
-
-The agent can `import firm.stats` inside sandbox code and call `zscore()`, `moving_avg()`, etc. directly. The reference example skill in §5.4 demonstrates this pattern.
+For example, the `zscore-monitor` skill bundles `scripts/firm_stats.py` directly — the sandbox code does `from firm_stats import zscore, moving_avg` rather than importing from a pre-installed `firm.*` package.
 
 ---
 
@@ -554,7 +582,6 @@ name: "<Human-readable skill name>"
 description: "<One-line summary — used in discovery tier>"
 version: "1.0"
 tags: [<keyword>, ...]
-tenant: "<desk-id> | common"
 allowed-tools:
   - <tool_name>
   - ...
@@ -583,6 +610,26 @@ quality:
 <Constraints, edge cases, output format requirements.>
 ```
 
+#### Skill Directory Structure (Anthropic AgentSkills Spec)
+
+Each skill is a self-contained directory following the Anthropic AgentSkills specification:
+
+```
+skill-name/
+├── SKILL.md                  # Skill definition (max 5,000 words; overflow → references/)
+├── scripts/
+│   ├── requirements.txt      # Skill-specific Python dependencies
+│   └── *.py                  # Bundled Python scripts used by the skill
+├── references/
+│   └── *.md                  # Extended documentation, data dictionaries, etc.
+└── assets/
+    └── *                     # Static assets (templates, sample data, configs)
+```
+
+- **SKILL.md** is limited to 5,000 words. Longer content goes in `references/`.
+- **`scripts/requirements.txt`** declares the skill's Python dependencies. The sandbox installs these at execution time (with per-skill caching).
+- **`scripts/*.py`** contains Python modules the skill's sandbox code can import directly.
+
 #### Frontmatter Field Reference
 
 | Field | Type | Required | Description |
@@ -591,7 +638,6 @@ quality:
 | `description` | string | yes | One-line summary for system prompt injection |
 | `version` | string | yes | Semver — used for changelog and rollback |
 | `tags` | list[string] | yes | Keywords for matching (e.g., `database`, `equities`, `statistics`) |
-| `tenant` | string | yes | Owning desk ID, or `common` for shared skills |
 | `allowed-tools` | list[string] | yes | Whitelist of tools the agent may invoke when executing this skill |
 | `inputs` | list[object] | no | Named parameters the user should provide |
 | `quality.timeout` | int | no | Max execution time in seconds (default: 60) |
@@ -619,7 +665,6 @@ name: "Database Query"
 description: "Query any registered database using natural language. Translates user questions into SQL/Python, executes in sandbox, and returns results."
 version: "1.0"
 tags: [database, query, sql, general]
-tenant: common
 allowed-tools:
   - query_database
   - execute_code
@@ -671,7 +716,6 @@ name: "Visualization"
 description: "Generate charts and plots from data using matplotlib or plotly. Returns rendered images in chat."
 version: "1.0"
 tags: [visualization, chart, plot, matplotlib, plotly]
-tenant: common
 allowed-tools:
   - execute_code
   - query_database
@@ -737,15 +781,14 @@ fig.savefig("/output/chart.png", dpi=150, bbox_inches="tight")
 
 ### 5.4 Reference Example — Z-Score Monitor with Moving Average
 
-This is the **reference skill** that demonstrates the internal library registry (`firm.stats`) combined with ClickHouse querying. It lives at `skills/equities/zscore-monitor/SKILL.md`.
+This is the **reference skill** that demonstrates a self-contained skill with bundled scripts (`scripts/firm_stats.py`) combined with ClickHouse querying. It lives at `skills/equities/zscore-monitor/SKILL.md`.
 
 ```yaml
 ---
 name: "Z-Score & Moving Average Monitor"
-description: "Compute z-scores and moving averages for equity metrics using firm.stats, with data sourced from ClickHouse. Flags statistical outliers and generates overlay charts."
+description: "Compute z-scores and moving averages for equity metrics using bundled firm_stats scripts, with data sourced from ClickHouse. Flags statistical outliers and generates overlay charts."
 version: "1.0"
 tags: [statistics, z-score, moving-average, equities, monitor, clickhouse]
-tenant: equities
 allowed-tools:
   - query_database
   - execute_code
@@ -779,12 +822,12 @@ Use this skill when the user wants to:
 - Compute rolling z-scores or moving averages for any numeric metric.
 - Visualize a metric against its statistical norms.
 
-This skill uses the **`firm.stats`** internal library for z-score and moving average computation, and queries **ClickHouse** (`ch-equities`) for raw data.
+This skill uses bundled **`scripts/firm_stats.py`** for z-score and moving average computation, and queries **ClickHouse** (`ch-equities`) for raw data.
 
 ## Instructions
 1. Query ClickHouse alias `ch-equities`, table `fundamentals_daily`, for the requested symbol and metric over a sufficient history (at least 2× the lookback window).
-2. Use `firm.stats.moving_avg(series, window)` to compute the rolling mean.
-3. Use `firm.stats.zscore(series, window)` to compute the rolling z-score.
+2. Use `firm_stats.moving_avg(series, window)` (from bundled `scripts/firm_stats.py`) to compute the rolling mean.
+3. Use `firm_stats.zscore(series, window)` to compute the rolling z-score.
 4. Flag rows where `abs(z_score) >= z_threshold` as outliers.
 5. Generate a dual-panel chart:
    - **Top panel:** raw metric line + moving average line + shaded z-score bands (±threshold × std around the MA).
@@ -801,7 +844,7 @@ import os
 import clickhouse_connect
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from firm.stats import zscore, moving_avg
+from firm_stats import zscore, moving_avg
 
 # --- 1. Query data ---
 client = clickhouse_connect.get_client(
@@ -816,7 +859,7 @@ df = client.query_df(
     "ORDER BY date"
 )
 
-# --- 2. Compute statistics using firm.stats ---
+# --- 2. Compute statistics using firm_stats (bundled in scripts/) ---
 window = 60
 threshold = 2.0
 df["ma"] = moving_avg(df["volume"], window)
@@ -884,7 +927,7 @@ fig.savefig("/output/chart.png", dpi=150, bbox_inches="tight")
 
 ## Quality Standards
 - Always fetch at least 2× the window length of history to ensure the moving average and z-score are stable from day one of the display range.
-- Use `firm.stats.zscore` and `firm.stats.moving_avg` — do not re-implement these from scratch.
+- Use `firm_stats.zscore` and `firm_stats.moving_avg` (bundled in `scripts/`) — do not re-implement these from scratch.
 - Chart must have: title, axis labels, legend, grid, date formatting.
 - The summary must include the plain-language interpretation — do not just dump numbers.
 - If the requested metric column does not exist in the schema, list available columns and ask the user to choose.
@@ -1036,7 +1079,7 @@ Every action in the system is logged as a structured JSON event. This is non-neg
 
 | Store | Purpose | Retention |
 |---|---|---|
-| **ClickHouse** | Analytics queries on audit data (dashboards, anomaly detection) | 1 year rolling |
+| **Deployer-configured analytics backend** | Analytics queries on audit data (dashboards, anomaly detection) | 1 year rolling |
 | **S3 / Minio** | Immutable, compressed archive (compliance) | 7 years (regulatory requirement) |
 | **PostgreSQL** | Session & conversation persistence, correlated with audit `trace_id` | 1 year |
 
@@ -1074,7 +1117,7 @@ Each tenant is a self-contained configuration unit that owns:
 
 | Resource | Tenant-Scoped? | Description |
 |---|---|---|
-| Skills | Yes | Skills in `skills/{tenant}/` are visible only to that tenant; `skills/common/` shared by all |
+| Skills | No (agent-scoped) | All skills are in the global registry. Access control is at the agent level via `AgentSkillBindings`, not tenant-scoped directories. |
 | Database aliases | Yes | Each tenant sees only its registered aliases in `DatabaseRegistry` |
 | MCP config | Yes | `config/tenants/{tenant_id}/mcp.json` — independent tool sets |
 | Resource quotas | Yes | Max concurrent sandboxes, LLM token budget per day/month |
@@ -1116,7 +1159,7 @@ Every layer enforces tenant boundaries:
 |---|---|
 | **Auth** | OAuth/OIDC token claims include group membership → mapped to `tenant_id` at session creation |
 | **Orchestration** | `TenantContext` is threaded through every call; `AgentRouter` refuses cross-tenant requests |
-| **Skills** | `SkillEngine.discover(tenant)` returns only `common/` + `{tenant}/` skills |
+| **Skills** | All skills in the global registry are available to any tenant. Access control is at the agent level — each agent config binds specific skills via `AgentSkillBindings`. |
 | **Database** | `DatabaseRegistry.list_aliases(tenant)` returns only that tenant's aliases; connection configs are tenant-scoped in the secret store |
 | **Sandbox** | Pod labels include `tenant_id`; `NetworkPolicy` selectors scope egress per tenant |
 | **MCP** | MCP server connections are established per-tenant per-session; no shared tool state |
@@ -1184,7 +1227,6 @@ Deep Agent is deployed on **self-hosted Kubernetes** (vanilla K8s or OpenShift) 
 │  │  ├─ worker (async task runner)   │                           │
 │  │  ├─ postgresql                   │  StatefulSets             │
 │  │  ├─ redis                        │                           │
-│  │  └─ clickhouse                   │                           │
 │  └──────────────────────────────────┘                           │
 │                                                                  │
 │  ┌──────────────────────────────────┐                           │
@@ -1210,7 +1252,7 @@ Deep Agent is deployed on **self-hosted Kubernetes** (vanilla K8s or OpenShift) 
 |---|---|---|---|
 | `deep-agent-api` | `python:3.12-slim` | FastAPI app, WebSocket handler, SkillEngine, orchestrator | Internal registry |
 | `deep-agent-worker` | `python:3.12-slim` | Async worker (audit flush, session cleanup, skill index rebuild) | Internal registry |
-| `deep-agent-sandbox` | `python:3.12-slim` | Pinned analytics libraries (`pandas`, `numpy`, `matplotlib`, `plotly`, `clickhouse-connect`, `redis`, `pymongo`, `mysqlclient`, `firm.*`) | Internal registry |
+| `deep-agent-sandbox` | `python:3.12-slim` | Python 3.12-slim + pip. Skill dependencies installed at runtime from `scripts/requirements.txt` (with per-skill caching). | Internal registry |
 | `deep-agent-mcp-*` | Varies per MCP server | MCP server process + dependencies | Internal registry |
 
 All images are built in CI, scanned for vulnerabilities (Trivy or equivalent), signed, and pushed to the firm's internal container registry. No public registry pulls at runtime.
@@ -1252,16 +1294,15 @@ merge to main
 | `skills-volume` | PVC (ReadOnlyMany) | `api`, `worker` | SKILL.md files synced from Git |
 | `pg-data` | PVC (ReadWriteOnce) | `postgresql` | Tenant config, sessions, conversations |
 | `redis-data` | PVC (ReadWriteOnce) | `redis` | Session cache, task queue, audit buffer |
-| `ch-data` | PVC (ReadWriteOnce) | `clickhouse` | Audit log analytics store |
-| `audit-archive` | S3/Minio bucket | `worker` | 7-year immutable audit archive |
+| `audit-archive` | S3/Minio bucket | `worker` | 7-year immutable audit archive; audit analytics via deployer-configured backend |
 
 ### 8.7 High Availability & Disaster Recovery
 
 - **API/Worker:** Multi-replica Deployments behind a Service; rolling updates with zero downtime.
 - **PostgreSQL:** Primary-replica with streaming replication; automatic failover via Patroni or equivalent operator.
 - **Redis:** Sentinel or Redis Cluster mode for HA.
-- **ClickHouse:** Replicated tables across multiple shards (if audit volume warrants).
-- **Backup:** Nightly PostgreSQL pg_dump to S3/Minio; ClickHouse backup to S3/Minio. RPO: 24 hours. RTO: 1 hour.
+- **Audit store:** Deployer-configured backend (e.g., ClickHouse, Elasticsearch, or cloud analytics service) with appropriate HA configuration.
+- **Backup:** Nightly PostgreSQL pg_dump to S3/Minio; audit backend backup to S3/Minio. RPO: 24 hours. RTO: 1 hour.
 - **Skills:** Git repo is the source of truth; PVC is rebuilt from Git on any failure.
 
 ---
@@ -1278,7 +1319,7 @@ merge to main
 | **Streaming** | WebSocket (RFC 6455) | — | Real-time bidirectional streaming; native browser support |
 | **Primary Database** | PostgreSQL | 16+ | Tenant config, session persistence, conversation history; ACID, mature ecosystem |
 | **Cache / Queue** | Redis | 7+ | Session cache, async task queue (audit flush, cleanup), pub/sub for events |
-| **Analytics DB** | ClickHouse | 24+ | Columnar analytics on audit logs and financial data; sub-second queries on billions of rows |
+| **Analytics DB** | ClickHouse (example) | 24+ | Example skill dependency for analytics; not a core framework requirement. Skills define their own data sources. |
 | **Object Storage** | S3 / Minio | — | Audit archive (7-year), chart image storage, backup target |
 | **Secret Management** | HashiCorp Vault | 1.15+ | Central credential store; dynamic secrets for DB access; K8s auth backend |
 | **Auth** | OAuth 2.0 / OIDC | — | Pluggable identity provider (Okta, Azure AD, Keycloak, PingFederate) |
@@ -1286,7 +1327,7 @@ merge to main
 | **Sandbox Runtime** | Python subprocess / K8s Pod | 3.12 | Pluggable execution backend; subprocess for dev, Pod for production |
 | **MCP Integration** | `langchain-mcp-adapters` | latest stable | Connects LangChain tools to MCP servers; per-tenant config |
 | **Visualization** | matplotlib, plotly | 3.9+, 5.22+ | Static and interactive charts; rendered in sandbox, returned as images/HTML |
-| **Internal Libraries** | `firm.stats`, `firm.risk`, `firm.pricing`, `firm.swaps` | internal | Pre-installed in sandbox image; exposed via Internal Library Registry |
+| **Internal Libraries** | Skills bundle own code | — | Skills bundle their own scripts in `scripts/` per the Anthropic AgentSkills spec. No centralized library registry. |
 | **Observability** | LangSmith / OpenTelemetry | — | LLM call tracing (LangSmith); distributed tracing and metrics (OTel) |
 | **Log Aggregation** | ELK Stack or Loki+Grafana | — | Platform logs (not audit — audit goes to ClickHouse/S3) |
 | **CI/CD** | Jenkins / GitLab CI / Tekton | — | Firm-standard pipeline; builds images, validates skills, deploys via Helm/Kustomize |
@@ -1298,7 +1339,7 @@ merge to main
 
 ### 10.1 Phase 1 — Foundation (Weeks 1–4)
 
-**Goal:** End-to-end agent loop — a single user on a single tenant can ask a natural-language question, the agent matches a skill, queries ClickHouse, executes Python in a sandbox, and streams the answer back.
+**Goal:** End-to-end agent loop — a single user on a single tenant can ask a natural-language question, the agent matches a skill, executes Python in a sandbox, and streams the answer back.
 
 | Deliverable | Details |
 |---|---|
@@ -1307,9 +1348,9 @@ merge to main
 | `SkillEngine` | Discover, match (tag-based), load; hot reload from filesystem |
 | WebSocket API | FastAPI app with `user_message` → `agent_chunk` / `tool_call` / `tool_result` / `agent_complete` streaming |
 | `SandboxManager` | `PythonSubprocessSandbox` backend with resource limits |
-| `DatabaseRegistry` | ClickHouse connector; single alias (`ch-equities`) |
-| Reference skills | `common/db-query`, `equities/zscore-monitor` |
-| End-to-end test | User asks "Show me z-scores for AAPL volume" → gets table + chart |
+| Resource Configuration | Generic resource env-var injection via tenant config |
+| Example skills | `data-query/db-query`, `equities/zscore-monitor` — self-contained with scripts (ClickHouse z-score demo) |
+| End-to-end test | User asks "Show me z-scores for AAPL volume" → skill executes Python in sandbox → gets table + chart |
 
 **Not in Phase 1:** Auth, multi-tenancy, persistence, audit logging, visualization skill (charts work via zscore-monitor, but no standalone viz skill yet).
 
@@ -1322,8 +1363,8 @@ merge to main
 | OAuth/OIDC auth | Token validation, tenant resolution from group claims, role mapping |
 | Multi-tenancy | `TenantContext` threading, tenant-scoped skills/DB/MCP, 2 tenants (Equities + Risk) |
 | PostgreSQL persistence | Tenant config, session storage, conversation history |
-| Audit logging | Full audit pipeline: structured events → Redis queue → ClickHouse + S3 |
-| All DB connectors | Redis, MongoDB, MySQL added to `DatabaseRegistry` |
+| Audit logging | Full audit pipeline: structured events → Redis queue → pluggable backend + S3 |
+| Additional resource templates | Example resource configs for Redis, MongoDB, MySQL added to examples |
 | LLM fallback | GPT-4.1 fallback in `LLMRouter`; tenant-level model override |
 | Visualization skill | `common/visualization` SKILL.md; matplotlib + plotly support |
 | Additional skills | 3–5 skills per onboarded desk |
@@ -1340,7 +1381,7 @@ merge to main
 | Subagent support | Agent can spawn child agents for multi-step workflows (via `deepagents` subgraph) |
 | Admin API | CRUD for tenants, DB aliases, quotas, role mappings; read-only audit query endpoint |
 | K8s deployment | Helm charts for all components; namespace layout per §8.2 |
-| Internal Library Registry | `firm.stats`, `firm.risk`, `firm.pricing`, `firm.swaps` registered and documented |
+| Example skill libraries | Skills bundle `firm_stats.py` etc. in their own `scripts/` directories; documented in example skills |
 | Skills CI/CD | Git-based pipeline per §8.5; PR review flow for skill authors |
 | Load testing | Target: 50 concurrent sessions, 10 concurrent sandbox executions, p95 latency < 5s for text response |
 | Security review | Penetration test of sandbox escape, prompt injection, cross-tenant access |
