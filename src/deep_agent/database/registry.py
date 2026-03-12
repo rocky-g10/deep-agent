@@ -72,10 +72,10 @@ class DatabaseRegistry:
 
     def get_connection(self, alias: str, tenant: TenantContext) -> ConnectionConfig:
         """Return connection configuration for an accessible alias."""
-        self._get_accessible_alias(alias=alias, tenant=tenant)
+        entry = self._get_accessible_alias(alias=alias, tenant=tenant)
 
         return ConnectionConfig(
-            engine="clickhouse",
+            engine=entry.engine,
             host=self._settings.clickhouse_host,
             port=self._settings.clickhouse_port,
             database=self._settings.clickhouse_database,

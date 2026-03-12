@@ -41,14 +41,16 @@ def load_mcp_config(
     config_root: Path = _DEFAULT_CONFIG_ROOT,
 ) -> MCPConfig:
     """Load and validate MCP config for a tenant."""
-    config_path = config_root / "tenants" / tenant.tenant_id / "mcp.json"
-
-    if not config_path.exists():
-        logger.debug("No MCP config found at %s — using empty config", config_path)
-        return MCPConfig()
+    config_path = (config_root / "tenants" / tenant.tenant_id / "mcp.json").resolve()
+    safe_root = (config_root / "tenants").resolve()
+    if not config_path.is_relative_to(safe_root):
+        raise MCPConfigError(f"Invalid tenant_id '{tenant.tenant_id}': path traversal detected")
 
     try:
         raw_text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.debug("No MCP config found at %s — using empty config", config_path)
+        return MCPConfig()
     except OSError as exc:
         raise MCPConfigError(f"Failed to read MCP config at {config_path}: {exc}") from exc
 

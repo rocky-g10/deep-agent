@@ -12,6 +12,7 @@ class SkillSummary(BaseModel):
     name: str
     description: str
     tags: list[str]
+    score: float = 0.0
 
 
 class SkillMetadata(SkillSummary):

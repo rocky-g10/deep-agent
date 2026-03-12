@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
+
+from langchain_core.tools import BaseTool
 
 from deep_agent.database.registry import DatabaseRegistry
 from deep_agent.mcp.manager import MCPManager
-from deep_agent.models import AgentEvent, ErrorEvent, SkillContent, SkillMatchEvent, TenantContext
+from deep_agent.models import (
+    AgentEvent,
+    ErrorEvent,
+    SkillContent,
+    SkillMatchEvent,
+    SkillSummary,
+    TenantContext,
+)
 from deep_agent.runtime.llm_router import LLMRouter
 from deep_agent.runtime.protocol import RuntimeAdapter
 from deep_agent.sandbox.protocol import SandboxManager
@@ -54,7 +62,7 @@ class AgentOrchestrator:
 
             if matched_skills:
                 top_match = matched_skills[0]
-                yield SkillMatchEvent(skill_id=top_match.skill_id, confidence=1.0)
+                yield SkillMatchEvent(skill_id=top_match.skill_id, confidence=top_match.score)
                 try:
                     skill_content = self._skill_engine.load(top_match.skill_id, context)
                     allowed_tools = list(skill_content.allowed_tools)
@@ -79,6 +87,7 @@ class AgentOrchestrator:
                 tools=all_tools,
                 system_prompt=system_prompt,
                 temperature=llm_config.temperature,
+                max_tokens=llm_config.max_tokens,
             )
 
             async for event in self._runtime.stream(agent, message, context):
@@ -87,14 +96,15 @@ class AgentOrchestrator:
             logger.exception("Orchestrator error")
             yield ErrorEvent(code="ORCHESTRATOR_ERROR", message=str(exc))
 
-    def _build_builtin_tools(self, context: TenantContext) -> list[Any]:
+    def _build_builtin_tools(self, context: TenantContext) -> list[BaseTool]:
         """Create built-in tools bound to tenant-scoped dependencies."""
-        tools: list[Any] = []
+        tools: list[BaseTool] = []
         tools.append(
             create_execute_code_tool(
                 sandbox=self._sandbox,
                 db_registry=self._db_registry,
                 tenant=context,
+                settings=self._db_registry._settings,
             )
         )
         tools.append(
@@ -105,7 +115,7 @@ class AgentOrchestrator:
         )
         return tools
 
-    async def _get_mcp_tools(self) -> list[Any]:
+    async def _get_mcp_tools(self) -> list[BaseTool]:
         """Return MCP tools if manager is configured and connected."""
         if self._mcp_manager is None:
             return []
@@ -122,7 +132,7 @@ class AgentOrchestrator:
         self,
         context: TenantContext,
         skill_content: SkillContent | None,
-        all_skills: list[Any],
+        all_skills: list[SkillSummary],
     ) -> str:
         """Construct a full system prompt with skills, data, and tool instructions."""
         parts: list[str] = []
@@ -172,7 +182,7 @@ class AgentOrchestrator:
         return "\n".join(parts)
 
 
-def _filter_tools(tools: list[Any], allowed_tools: list[str]) -> list[Any]:
+def _filter_tools(tools: list[BaseTool], allowed_tools: list[str]) -> list[BaseTool]:
     """Filter tools by name against a skill's allowlist."""
     allowed_set = set(allowed_tools)
     return [tool for tool in tools if getattr(tool, "name", None) in allowed_set]

@@ -11,8 +11,8 @@ class TenantContext:
 
     tenant_id: str
     user_id: str
-    skills_dirs: list[str]
-    db_aliases: list[str]
+    skills_dirs: tuple[str, ...]
+    db_aliases: tuple[str, ...]
 
     @classmethod
     def stub(cls) -> TenantContext:
@@ -20,6 +20,6 @@ class TenantContext:
         return cls(
             tenant_id="equities",
             user_id="dev-user",
-            skills_dirs=["skills/common", "skills/equities"],
-            db_aliases=["ch-equities"],
+            skills_dirs=("skills/common", "skills/equities"),
+            db_aliases=("ch-equities",),
         )

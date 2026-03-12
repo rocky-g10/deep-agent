@@ -14,8 +14,8 @@ def _tenant(tenant_id: str = "equities") -> TenantContext:
     return TenantContext(
         tenant_id=tenant_id,
         user_id="test-user",
-        skills_dirs=[],
-        db_aliases=[],
+        skills_dirs=(),
+        db_aliases=(),
     )
 
 
@@ -132,3 +132,16 @@ def test_env_vars_parsed(tmp_path: Path) -> None:
     config = load_mcp_config(_tenant(), config_root=tmp_path)
 
     assert config.servers[0].env == {"KEY": "VAL"}
+
+
+def test_load_mcp_config_path_traversal(tmp_path: Path) -> None:
+    """Path traversal tenant IDs should be rejected."""
+    tenant = TenantContext(
+        tenant_id="../../etc",
+        user_id="test-user",
+        skills_dirs=(),
+        db_aliases=(),
+    )
+
+    with pytest.raises(MCPConfigError, match="path traversal"):
+        load_mcp_config(tenant, config_root=tmp_path)

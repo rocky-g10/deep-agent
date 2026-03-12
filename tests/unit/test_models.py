@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import TypeAdapter
+from pydantic import SecretStr, TypeAdapter
 
 from deep_agent.config import AppSettings
 from deep_agent.models import (
@@ -30,8 +30,8 @@ def test_tenant_context_stub_returns_expected_equities_values() -> None:
 
     assert stub.tenant_id == "equities"
     assert stub.user_id == "dev-user"
-    assert stub.skills_dirs == ["skills/common", "skills/equities"]
-    assert stub.db_aliases == ["ch-equities"]
+    assert stub.skills_dirs == ("skills/common", "skills/equities")
+    assert stub.db_aliases == ("ch-equities",)
 
 
 def test_llm_config_roundtrip() -> None:
@@ -89,7 +89,7 @@ def test_connection_config_roundtrip() -> None:
 
 def test_agent_event_discriminator_deserializes_all_event_types() -> None:
     """AgentEvent discriminated union should deserialize each event payload shape."""
-    adapter = TypeAdapter(AgentEvent)
+    adapter: TypeAdapter[AgentEvent] = TypeAdapter(AgentEvent)
 
     payloads: list[dict[str, Any]] = [
         {"type": "agent_chunk", "content": "hello"},
@@ -118,7 +118,7 @@ def test_app_settings_loads_defaults(monkeypatch: Any) -> None:
     monkeypatch.delenv("CLICKHOUSE_HOST", raising=False)
     monkeypatch.delenv("SKILLS_ROOT", raising=False)
 
-    settings = AppSettings()
+    settings = AppSettings(OPENAI_API_KEY=SecretStr("test-key"))
 
     assert settings.openai_model == "gpt-5"
     assert settings.clickhouse_host == "localhost"

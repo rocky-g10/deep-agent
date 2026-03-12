@@ -29,6 +29,9 @@ class MCPManager:
 
     async def connect(self) -> None:
         """Connect to configured MCP servers and discover tools."""
+        if self._client is not None:
+            await self.disconnect()
+
         if not _HAS_MCP_ADAPTERS:
             logger.warning("langchain-mcp-adapters not installed — MCP tools unavailable")
             return
@@ -75,6 +78,18 @@ class MCPManager:
 
     async def disconnect(self) -> None:
         """Disconnect MCP client and clear discovered tools."""
+        if self._client is not None:
+            try:
+                close = getattr(self._client, "close", None) or getattr(
+                    self._client, "aclose", None
+                )
+                if close is not None:
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
+            except Exception as exc:
+                logger.warning("Error closing MCP client: %s", exc)
+
         self._client = None
         self._tools = []
         self._connected = False

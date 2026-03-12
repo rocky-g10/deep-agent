@@ -44,7 +44,11 @@ class LangGraphAdapter(RuntimeAdapter):
     ) -> Agent:
         """Build a compiled agent graph for execution."""
         temperature = float(kwargs.get("temperature", 0.0))
-        llm = ChatOpenAI(model=model, temperature=temperature)
+        max_tokens = kwargs.get("max_tokens")
+        llm_kwargs: dict[str, Any] = {"model": model, "temperature": temperature}
+        if max_tokens is not None:
+            llm_kwargs["max_tokens"] = int(max_tokens)
+        llm = ChatOpenAI(**llm_kwargs)
 
         if USING_DEEPAGENTS:
             try:
@@ -65,7 +69,11 @@ class LangGraphAdapter(RuntimeAdapter):
         """Run the agent and return a normalized response."""
         _ = context
         payload = {"messages": [HumanMessage(content=message)]}
-        result = await agent.ainvoke(payload)
+        try:
+            result = await agent.ainvoke(payload)
+        except Exception as exc:
+            logger.exception("Agent invocation failed")
+            return AgentResponse(content=f"Error: {exc}", tool_calls=[], tokens_used=0)
 
         messages = _extract_messages(result)
         final_message = messages[-1] if messages else AIMessage(content="")

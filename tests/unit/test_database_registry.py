@@ -3,39 +3,32 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import SecretStr
 
 from deep_agent.config import AppSettings
 from deep_agent.database import AliasNotFoundError, DatabaseRegistry
-from deep_agent.models import TenantContext
-
-
-def _tenant_equities() -> TenantContext:
-    return TenantContext(
-        tenant_id="equities",
-        user_id="test-user",
-        skills_dirs=["skills/common", "skills/equities"],
-        db_aliases=["ch-equities"],
-    )
+from deep_agent.database.registry import _ALIASES
+from deep_agent.models import DatabaseAlias, TenantContext
 
 
 def _tenant_no_db() -> TenantContext:
     return TenantContext(
         tenant_id="empty",
         user_id="test-user",
-        skills_dirs=[],
-        db_aliases=[],
+        skills_dirs=(),
+        db_aliases=(),
     )
 
 
 def _settings() -> AppSettings:
-    return AppSettings(OPENAI_API_KEY="test-key")
+    return AppSettings(OPENAI_API_KEY=SecretStr("test-key"))
 
 
-def test_list_aliases_returns_ch_equities() -> None:
+def test_list_aliases_returns_ch_equities(tenant_equities: TenantContext) -> None:
     """Equities tenant should see the ch-equities alias."""
     registry = DatabaseRegistry(_settings())
 
-    aliases = registry.list_aliases(_tenant_equities())
+    aliases = registry.list_aliases(tenant_equities)
 
     assert len(aliases) == 1
     assert aliases[0].alias == "ch-equities"
@@ -51,11 +44,11 @@ def test_list_aliases_empty_for_no_db_tenant() -> None:
     assert aliases == []
 
 
-def test_get_metadata_returns_fundamentals_table() -> None:
+def test_get_metadata_returns_fundamentals_table(tenant_equities: TenantContext) -> None:
     """get_metadata should return the fundamentals_daily table schema."""
     registry = DatabaseRegistry(_settings())
 
-    meta = registry.get_metadata("ch-equities", _tenant_equities())
+    meta = registry.get_metadata("ch-equities", tenant_equities)
 
     assert meta.alias == "ch-equities"
     assert meta.engine == "clickhouse"
@@ -67,12 +60,12 @@ def test_get_metadata_returns_fundamentals_table() -> None:
     assert meta.tables[0].columns["pe_ratio"] == "Nullable(Float64)"
 
 
-def test_get_metadata_unknown_alias_raises() -> None:
+def test_get_metadata_unknown_alias_raises(tenant_equities: TenantContext) -> None:
     """Unknown alias should raise AliasNotFoundError."""
     registry = DatabaseRegistry(_settings())
 
     with pytest.raises(AliasNotFoundError):
-        registry.get_metadata("ch-unknown", _tenant_equities())
+        registry.get_metadata("ch-unknown", tenant_equities)
 
 
 def test_get_metadata_wrong_tenant_raises() -> None:
@@ -83,17 +76,17 @@ def test_get_metadata_wrong_tenant_raises() -> None:
         registry.get_metadata("ch-equities", _tenant_no_db())
 
 
-def test_get_connection_returns_config_from_settings() -> None:
+def test_get_connection_returns_config_from_settings(tenant_equities: TenantContext) -> None:
     """get_connection should populate host/port from AppSettings."""
     settings = AppSettings(
-        OPENAI_API_KEY="test-key",
+        OPENAI_API_KEY=SecretStr("test-key"),
         CLICKHOUSE_HOST="db.example.com",
         CLICKHOUSE_PORT=9000,
         CLICKHOUSE_DATABASE="equities_db",
     )
     registry = DatabaseRegistry(settings)
 
-    conn = registry.get_connection("ch-equities", _tenant_equities())
+    conn = registry.get_connection("ch-equities", tenant_equities)
 
     assert conn.engine == "clickhouse"
     assert conn.host == "db.example.com"
@@ -101,20 +94,37 @@ def test_get_connection_returns_config_from_settings() -> None:
     assert conn.database == "equities_db"
 
 
-def test_get_connection_unknown_alias_raises() -> None:
+def test_get_connection_unknown_alias_raises(tenant_equities: TenantContext) -> None:
     """Unknown alias should raise AliasNotFoundError for get_connection."""
     registry = DatabaseRegistry(_settings())
 
     with pytest.raises(AliasNotFoundError):
-        registry.get_connection("ch-unknown", _tenant_equities())
+        registry.get_connection("ch-unknown", tenant_equities)
 
 
-def test_metadata_has_all_eight_columns() -> None:
+def test_metadata_has_all_eight_columns(tenant_equities: TenantContext) -> None:
     """fundamentals_daily should have exactly 8 columns."""
     registry = DatabaseRegistry(_settings())
 
-    meta = registry.get_metadata("ch-equities", _tenant_equities())
+    meta = registry.get_metadata("ch-equities", tenant_equities)
     columns = meta.tables[0].columns
 
     expected_columns = {"date", "symbol", "open", "high", "low", "close", "volume", "pe_ratio"}
     assert set(columns.keys()) == expected_columns
+
+
+def test_get_connection_engine_from_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tenant_equities: TenantContext,
+) -> None:
+    """Connection engine should be sourced from alias metadata."""
+    monkeypatch.setitem(
+        _ALIASES,
+        "ch-equities",
+        DatabaseAlias(alias="ch-equities", engine="custom-engine", description="x"),
+    )
+    registry = DatabaseRegistry(_settings())
+
+    conn = registry.get_connection("ch-equities", tenant_equities)
+
+    assert conn.engine == "custom-engine"

@@ -81,7 +81,7 @@ def _validate_required_fields(metadata: Mapping[str, Any], path: Path) -> None:
 def _derive_skill_id(path: Path) -> str:
     parts = list(path.parts)
     if "skills" in parts:
-        skills_index = parts.index("skills")
+        skills_index = len(parts) - 1 - parts[::-1].index("skills")
         rel_parts = parts[skills_index + 1 : -1]
         if rel_parts:
             return "/".join(rel_parts)

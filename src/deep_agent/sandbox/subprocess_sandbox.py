@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import shutil
 import tempfile
@@ -14,6 +15,24 @@ from asyncio.subprocess import PIPE
 from pathlib import Path
 
 from deep_agent.models import ExecuteResult, ResourceLimits
+
+logger = logging.getLogger(__name__)
+
+_SANDBOX_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "TERM",
+    }
+)
+_ALLOWED_ENV_PREFIXES = ("DB_", "CH_", "PG_", "REDIS_", "MONGO_")
 
 
 class PythonSubprocessSandbox:
@@ -42,7 +61,11 @@ class PythonSubprocessSandbox:
 
         if files_in:
             for rel_path, file_bytes in files_in.items():
-                target = temp_dir / rel_path
+                target = (temp_dir / rel_path).resolve()
+                if not target.is_relative_to(temp_dir.resolve()):
+                    raise ValueError(
+                        f"Path traversal detected: '{rel_path}' escapes sandbox directory"
+                    )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(file_bytes)
 
@@ -111,7 +134,11 @@ class PythonSubprocessSandbox:
             shutil.rmtree(path)
 
     def _build_process_env(self, env_overrides: dict[str, str] | None) -> dict[str, str]:
-        process_env = os.environ.copy()
+        process_env = {
+            key: val
+            for key, val in os.environ.items()
+            if key in _SANDBOX_ENV_ALLOWLIST
+        }
 
         if self._stubs_path is not None:
             existing_path = process_env.get("PYTHONPATH", "")
@@ -122,7 +149,12 @@ class PythonSubprocessSandbox:
                 process_env["PYTHONPATH"] = stubs_entry
 
         if env_overrides:
-            process_env.update(env_overrides)
+            for key, val in env_overrides.items():
+                if any(key.startswith(prefix) for prefix in _ALLOWED_ENV_PREFIXES):
+                    process_env[key] = val
+                else:
+                    # Warning for visibility when a caller attempts unsafe overrides.
+                    logger.warning("Blocked disallowed env override: %s", key)
 
         return process_env
 
@@ -160,8 +192,14 @@ def _collect_output_files(output_dir: Path) -> dict[str, str]:
     if not output_dir.exists():
         return files
 
+    resolved_output = output_dir.resolve()
     for file_path in sorted(output_dir.rglob("*")):
-        if file_path.is_file():
-            rel = file_path.relative_to(output_dir).as_posix()
-            files[rel] = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+        if not file_path.is_file():
+            continue
+        if file_path.is_symlink():
+            continue
+        if not file_path.resolve().is_relative_to(resolved_output):
+            continue
+        rel = file_path.relative_to(output_dir).as_posix()
+        files[rel] = base64.b64encode(file_path.read_bytes()).decode("utf-8")
     return files

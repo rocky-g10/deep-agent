@@ -76,10 +76,10 @@ async def test_execute_env_var_injection() -> None:
     sandbox = PythonSubprocessSandbox()
     code = """
 import os
-print(os.environ['TEST_VAR'])
+print(os.environ['DB_TEST_VAR'])
 """
 
-    result = await sandbox.execute(code, env={"TEST_VAR": "VALUE123"})
+    result = await sandbox.execute(code, env={"DB_TEST_VAR": "VALUE123"})
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "VALUE123"
@@ -137,4 +137,79 @@ print(callable(zscore), callable(moving_avg))
 
     assert result.exit_code == 0
     assert "True True" in result.stdout
+    await sandbox.cleanup(result.execution_id)
+
+
+@pytest.mark.timeout(10)
+async def test_files_in_path_traversal_blocked() -> None:
+    """files_in entries must not escape the sandbox directory."""
+    sandbox = PythonSubprocessSandbox()
+
+    with pytest.raises(ValueError, match="Path traversal"):
+        await sandbox.execute("", files_in={"../../etc/evil": b"x"})
+
+    with pytest.raises(ValueError, match="Path traversal"):
+        await sandbox.execute("", files_in={"/tmp/evil": b"x"})
+
+
+@pytest.mark.timeout(10)
+async def test_output_files_symlinks_skipped() -> None:
+    """Symlinked files in output/ should be skipped for security."""
+    sandbox = PythonSubprocessSandbox()
+    code = """
+import os
+from pathlib import Path
+
+Path('output/real.txt').write_text('real')
+os.symlink('/etc/passwd', 'output/leaked')
+"""
+
+    result = await sandbox.execute(code)
+
+    assert "real.txt" in result.output_files
+    assert "leaked" not in result.output_files
+    await sandbox.cleanup(result.execution_id)
+
+
+@pytest.mark.timeout(10)
+async def test_sandbox_env_does_not_leak_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Host secret env vars should not leak into sandbox subprocess env."""
+    monkeypatch.setenv("SECRET_TOKEN", "hunter2")
+    sandbox = PythonSubprocessSandbox()
+    code = """
+import os
+print(os.environ.get('SECRET_TOKEN', 'ABSENT'))
+"""
+
+    result = await sandbox.execute(code)
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "ABSENT"
+    await sandbox.cleanup(result.execution_id)
+
+
+@pytest.mark.timeout(10)
+async def test_env_overrides_blocks_dangerous_keys() -> None:
+    """Only allowlisted env prefixes should be applied to sandbox process env."""
+    sandbox = PythonSubprocessSandbox()
+    code = """
+import os
+print(os.environ.get('LD_PRELOAD', 'MISSING'))
+print(os.environ.get('PATH', 'MISSING'))
+print(os.environ.get('CH_EQUITIES_HOST', 'MISSING'))
+"""
+
+    result = await sandbox.execute(
+        code,
+        env={
+            "LD_PRELOAD": "/evil.so",
+            "PATH": "/evil",
+            "CH_EQUITIES_HOST": "safe-host",
+        },
+    )
+
+    lines = result.stdout.strip().splitlines()
+    assert lines[0] == "MISSING"
+    assert lines[1] != "/evil"
+    assert lines[2] == "safe-host"
     await sandbox.cleanup(result.execution_id)

@@ -7,6 +7,7 @@ import logging
 
 from langchain_core.tools import BaseTool, tool
 
+from deep_agent.config import AppSettings
 from deep_agent.database.registry import DatabaseRegistry
 from deep_agent.models import TenantContext
 from deep_agent.sandbox.protocol import SandboxManager
@@ -18,9 +19,10 @@ def create_execute_code_tool(
     sandbox: SandboxManager,
     db_registry: DatabaseRegistry,
     tenant: TenantContext,
+    settings: AppSettings,
 ) -> BaseTool:
     """Create an execute_code tool with injected sandbox and tenant dependencies."""
-    db_env = _build_db_env(db_registry=db_registry, tenant=tenant)
+    db_env = _build_db_env(db_registry=db_registry, tenant=tenant, settings=settings)
 
     @tool
     async def execute_code(code: str, timeout: int = 60) -> str:
@@ -52,19 +54,39 @@ def create_execute_code_tool(
     return execute_code
 
 
-def _build_db_env(db_registry: DatabaseRegistry, tenant: TenantContext) -> dict[str, str]:
+def _build_db_env(
+    db_registry: DatabaseRegistry,
+    tenant: TenantContext,
+    settings: AppSettings,
+) -> dict[str, str]:
     """Build database-related environment variables from accessible aliases."""
     env: dict[str, str] = {}
-    for alias_info in db_registry.list_aliases(tenant):
+    aliases = db_registry.list_aliases(tenant)
+
+    for alias_info in aliases:
         try:
             conn = db_registry.get_connection(alias_info.alias, tenant)
+            prefix = alias_info.alias.upper().replace("-", "_")
+            env[f"{prefix}_HOST"] = conn.host
+            env[f"{prefix}_PORT"] = str(conn.port)
+            env[f"{prefix}_NAME"] = conn.database
+            env[f"{prefix}_USER"] = _extract_db_user(conn.credentials_ref)
+            env[f"{prefix}_PASS"] = _extract_db_pass(settings)
+        except Exception:
+            logger.warning("Failed to resolve connection for alias %s", alias_info.alias)
+
+    if aliases:
+        first = aliases[0]
+        try:
+            conn = db_registry.get_connection(first.alias, tenant)
             env["DB_HOST"] = conn.host
             env["DB_PORT"] = str(conn.port)
             env["DB_NAME"] = conn.database
             env["DB_USER"] = _extract_db_user(conn.credentials_ref)
-            env["DB_PASS"] = ""
+            env["DB_PASS"] = _extract_db_pass(settings)
         except Exception:
-            logger.warning("Failed to resolve connection for alias %s", alias_info.alias)
+            logger.warning("Failed to resolve default DB_* env for alias %s", first.alias)
+
     return env
 
 
@@ -73,3 +95,10 @@ def _extract_db_user(credentials_ref: str) -> str:
     if ":" in credentials_ref:
         return credentials_ref.rsplit(":", maxsplit=1)[-1]
     return "default"
+
+
+def _extract_db_pass(settings: AppSettings) -> str:
+    """Extract database password from application settings."""
+    if settings.clickhouse_password is not None:
+        return settings.clickhouse_password.get_secret_value()
+    return ""

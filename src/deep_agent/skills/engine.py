@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -13,6 +14,7 @@ from deep_agent.models import SkillContent, SkillSummary, TenantContext
 from deep_agent.skills.parser import parse_skill_file
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9_]+")
+logger = logging.getLogger(__name__)
 
 
 class Clock(Protocol):
@@ -68,15 +70,18 @@ class SkillEngine:
         scored.sort(key=lambda item: (-item[0], item[1].skill_id))
         top = scored[:top_k] if top_k > 0 else []
 
-        return [
+        result = [
             SkillSummary(
                 skill_id=skill.skill_id,
                 name=skill.name,
                 description=skill.description,
                 tags=skill.tags,
+                score=score,
             )
-            for _, skill in top
+            for score, skill in top
         ]
+        logger.debug("Matched %d skills for query (top_k=%d)", len(result), top_k)
+        return result
 
     def load(self, skill_id: str, tenant: TenantContext) -> SkillContent:
         """Return full skill content for a visible skill ID."""
@@ -85,6 +90,7 @@ class SkillEngine:
             skill = self._skills_index.get(skill_id)
 
         if skill is None or not _is_visible_to_tenant(skill=skill, tenant=tenant):
+            logger.debug("Skill '%s' not found for tenant '%s'", skill_id, tenant.tenant_id)
             raise SkillNotFoundError(
                 f"Skill '{skill_id}' not found for tenant '{tenant.tenant_id}'"
             )
@@ -113,6 +119,7 @@ class SkillEngine:
             if should_refresh:
                 self._skills_index = new_index
                 self._last_scan_at = now
+                logger.debug("Refreshing skills cache (%d skills)", len(new_index))
 
     def _needs_refresh(self) -> bool:
         now = self._clock()
@@ -122,8 +129,11 @@ class SkillEngine:
     def _scan_filesystem(self) -> dict[str, SkillContent]:
         index: dict[str, SkillContent] = {}
         for skill_file in sorted(self._skills_root.rglob("SKILL.md")):
-            skill = self._parser(skill_file)
-            index[skill.skill_id] = skill
+            try:
+                skill = self._parser(skill_file)
+                index[skill.skill_id] = skill
+            except Exception as exc:
+                logger.warning("Skipping malformed skill file %s: %s", skill_file, exc)
         return index
 
 

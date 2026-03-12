@@ -158,3 +158,27 @@ This file has no frontmatter delimiters.
 
     with pytest.raises(SkillParseError):
         parse_skill_file(skill_path)
+
+
+def test_derive_skill_id_nested_skills_dir(tmp_path: Path) -> None:
+    """Parser should derive ID from the last 'skills' directory in path."""
+    skill_path = (
+        tmp_path / "a" / "skills" / "archive" / "skills" / "equities" / "nested" / "SKILL.md"
+    )
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: nested
+description: nested path
+version: "1.0.0"
+tags: [equities]
+tenant: equities
+allowed-tools: [query_database]
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+    assert skill.skill_id == "equities/nested"

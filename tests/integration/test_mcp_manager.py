@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from unittest.mock import patch
 
 import pytest
 
 from deep_agent.mcp.config import MCPConfig, MCPServerConfig
 from deep_agent.mcp.manager import MCPManager
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_MCP_INTEGRATION") != "1",
+    reason="Set RUN_MCP_INTEGRATION=1 to run MCP integration tests.",
+)
 
 
 def _echo_server_config() -> MCPConfig:
@@ -117,3 +124,55 @@ async def test_empty_config_connect_is_noop() -> None:
 
     assert tools == []
     assert manager.connected is False
+
+
+@pytest.mark.asyncio
+async def test_disconnect_calls_close_when_available() -> None:
+    """disconnect() should call close/aclose on the client when present."""
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    manager = MCPManager(_echo_server_config())
+    client = DummyClient()
+    manager._client = client
+
+    await manager.disconnect()
+
+    assert client.closed is True
+    assert manager.connected is False
+
+
+@pytest.mark.asyncio
+async def test_connect_twice_disconnects_first() -> None:
+    """Second connect() should disconnect/close the first client instance."""
+
+    class DummyClient:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.closed = False
+
+        async def get_tools(self, *, server_name: str | None = None) -> list[object]:
+            _ = server_name
+            return [object()]
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    first = DummyClient("first")
+    second = DummyClient("second")
+
+    with (
+        patch("deep_agent.mcp.manager._HAS_MCP_ADAPTERS", True),
+        patch("deep_agent.mcp.manager.MultiServerMCPClient", side_effect=[first, second]),
+    ):
+        manager = MCPManager(_echo_server_config())
+        await manager.connect()
+        await manager.connect()
+
+    assert first.closed is True
+    assert manager._client is second

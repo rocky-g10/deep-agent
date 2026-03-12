@@ -61,28 +61,6 @@ def _write_skill(
 
 
 @pytest.fixture
-def tenant_equities() -> TenantContext:
-    """Return a tenant context for equities tests."""
-    return TenantContext(
-        tenant_id="equities",
-        user_id="test-user",
-        skills_dirs=["skills/common", "skills/equities"],
-        db_aliases=["ch-equities"],
-    )
-
-
-@pytest.fixture
-def tenant_risk() -> TenantContext:
-    """Return a tenant context for risk tests."""
-    return TenantContext(
-        tenant_id="risk",
-        user_id="test-user",
-        skills_dirs=["skills/common", "skills/risk"],
-        db_aliases=["ch-risk"],
-    )
-
-
-@pytest.fixture
 def temp_skills_root(tmp_path: Path) -> Path:
     """Create an isolated skills tree for engine tests."""
     root = tmp_path / "skills"
@@ -243,3 +221,41 @@ def test_cache_invalidation_picks_up_filesystem_changes(
     post_ttl = {skill.skill_id for skill in engine.discover(tenant_equities)}
 
     assert "equities/momentum-watch" in post_ttl
+
+
+def test_discover_skips_malformed_skill_file(
+    tmp_path: Path,
+    tenant_equities: TenantContext,
+) -> None:
+    """Malformed skill files should be skipped without failing discovery."""
+    skills_root = tmp_path / "skills"
+    _write_skill(
+        root=skills_root,
+        tenant_dir="common",
+        skill_dir="db-query",
+        name="db-query",
+        description="Query databases",
+        tags=["database"],
+        tenant="common",
+    )
+    bad_skill = skills_root / "equities" / "broken" / "SKILL.md"
+    bad_skill.parent.mkdir(parents=True, exist_ok=True)
+    bad_skill.write_text(
+        """---
+name: broken
+description: malformed
+version: "1.0.0"
+tags: [equities
+tenant: equities
+allowed-tools: [query_database]
+---
+bad
+""",
+        encoding="utf-8",
+    )
+
+    engine = SkillEngine(skills_root=skills_root)
+    discovered = engine.discover(tenant_equities)
+
+    assert len(discovered) == 1
+    assert discovered[0].skill_id == "common/db-query"
