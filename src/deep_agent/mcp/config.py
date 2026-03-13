@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from deep_agent.models import TenantContext
+from deep_agent.models.skills import SkillMCPServer
 
 logger = logging.getLogger(__name__)
 
@@ -81,3 +82,31 @@ def load_mcp_config(
             )
 
     return config
+
+
+def merge_mcp_configs(
+    skill_servers: list[SkillMCPServer],
+    tenant_config: MCPConfig,
+) -> MCPConfig:
+    """Merge skill-level and tenant-level MCP server declarations.
+
+    Tenant config takes precedence: if both declare a server with the same
+    name, the tenant's version wins.
+    """
+    merged: dict[str, MCPServerConfig] = {}
+
+    # Skill servers as defaults
+    for s in skill_servers:
+        merged[s.name] = MCPServerConfig(
+            name=s.name,
+            transport=s.transport,
+            command=s.command,
+            url=s.url,
+            env=s.env,
+        )
+
+    # Tenant overrides by name
+    for ts in tenant_config.servers:
+        merged[ts.name] = ts
+
+    return MCPConfig(servers=list(merged.values()))

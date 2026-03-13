@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +25,24 @@ class SkillQuality(BaseModel):
     validation: str = ""
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class SkillMCPServer(BaseModel):
+    """MCP server declared in a skill's SKILL.md frontmatter."""
+
+    name: str
+    transport: Literal["stdio", "sse"]
+    command: list[str] | None = Field(default=None)
+    url: str | None = Field(default=None)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MCPToolBinding:
+    """Explicit binding of a tool name to a specific MCP server."""
+
+    tool_name: str
+    server_name: str
 
 
 class SkillSummary(BaseModel):
@@ -52,6 +71,8 @@ class SkillContent(SkillMetadata):
     scripts_path: str = ""
     inputs: list[SkillInput] = Field(default_factory=list)
     quality: SkillQuality = Field(default_factory=SkillQuality)
+    mcp_servers: list[SkillMCPServer] = Field(default_factory=list)
+    mcp_tool_bindings: list[MCPToolBinding] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

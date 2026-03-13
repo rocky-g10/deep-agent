@@ -32,19 +32,33 @@ deep-agent/
 │   ├── equities/
 │   └── ...
 ├── config/
-│   └── tenants/{id}/       ← Tenant resource aliases + MCP config
+│   ├── agents/              ← Agent → skill bindings
+│   └── tenants/{id}/        ← (optional) Resource aliases + MCP config
 ├── src/deep_agent/          ← Framework core — DO NOT MODIFY
 ├── tests/
 └── docs/
 ```
 
-**Your workflow:** create skill directories under `skills/`, configure resources under `config/`, and let the framework handle everything else.
+**Your workflow:** create skill directories under `skills/`, bind them in `config/agents/`, and let the framework handle everything else. Tenant config is optional — add it when you need environment separation or multi-tenancy.
 
 ---
 
-## 3. Creating Your First Skill
+## 3. Getting Started: Progression Path
 
-Every skill is a self-contained directory following the Anthropic AgentSkills spec:
+You don't need to configure everything at once. Start simple and add layers as needed:
+
+| Level | What you need | When |
+|-------|--------------|------|
+| **1. Quickstart** | A `SKILL.md` + agent YAML. Hardcode DB connections in your skill code. | Getting started, prototyping |
+| **2. Environment separation** | Add `resources.yaml` to externalize connection strings (dev vs prod) | Multiple environments |
+| **3. MCP tools** | Add `mcp-servers` to your SKILL.md (or tenant `mcp.json` for overrides) | Your skill needs external tool servers |
+| **4. Multi-tenancy** | Different tenants get different resources and MCP servers | Enterprise deployment |
+
+---
+
+## 4. Creating Your First Skill
+
+Every skill is a self-contained directory:
 
 ```
 skills/risk/portfolio-var/
@@ -57,17 +71,6 @@ skills/risk/portfolio-var/
 └── assets/
     └── sector_weights.csv   # Static data, templates, configs
 ```
-
-The full example below demonstrates all three integration patterns in one skill.
-
----
-
-## 4. Example Skill: Portfolio Risk Report
-
-This skill computes Value at Risk (VaR) for a portfolio by:
-- **Pattern A** — importing a bundled `risk_calc.py` module
-- **Pattern B** — querying KDB+ for live trading positions via resource env vars
-- **Pattern C** — calling an MCP tool (`get_market_data`) for real-time pricing
 
 ### 4.1 `skills/risk/portfolio-var/SKILL.md`
 
@@ -85,6 +88,10 @@ tags:
 allowed-tools:
   - execute_code
   - get_market_data
+mcp-servers:                              # Optional: declare MCP servers the skill needs
+  - name: market-data-mcp
+    transport: sse
+    url: http://market-data-mcp.internal:8080/sse
 inputs:
   - name: portfolio_id
     type: string
@@ -248,9 +255,125 @@ bound_skill_ids:
 
 Only skills in `bound_skill_ids` are discoverable by this agent.
 
-### 5.2 Resource Aliases
+### 5.2 MCP Servers
 
-Define resource env vars for your data sources in tenant config:
+Skills can declare MCP server dependencies directly in `SKILL.md` frontmatter — no tenant config required. There are two ways to use MCP servers from a skill:
+
+---
+
+#### Mode 1: Connect to an MCP server (use all its tools)
+
+Declare the server and let the framework discover all tools it exposes. The agent picks whichever tools are appropriate at runtime. Best for general-purpose servers where you don't need to control exactly which tool is called.
+
+```yaml
+---
+name: "Market Scanner"
+description: "Scan for unusual market activity using a market data MCP server."
+version: "1.0.0"
+mcp-servers:
+  - name: market-data
+    transport: sse
+    url: http://localhost:8080/sse
+---
+
+# Market Scanner
+
+## Instructions
+
+1. **Connect to the `market-data` MCP server** — discover available tools and use whichever are relevant to the user's query.
+2. **Analyze the data** — use `execute_code` to compute metrics and generate charts.
+```
+
+The framework connects to the server, discovers its tools, and makes them all available to the agent.
+
+---
+
+#### Mode 2: Connect to a specific server and call a specific tool
+
+Declare one or more servers AND explicitly bind steps to specific tools on specific servers. This is the most precise approach — each step says exactly which server provides which tool. Best for multi-server skills where different steps hit different data sources.
+
+```yaml
+---
+name: "Portfolio VaR Report"
+description: "Compute Value at Risk using positions from a database and market data from MCP servers."
+version: "1.0.0"
+allowed-tools:
+  - execute_code
+  - get_market_data
+  - get_fx_rates
+mcp-servers:
+  - name: market-data
+    transport: sse
+    url: http://localhost:8080/sse
+  - name: fx-service
+    transport: sse
+    url: http://localhost:9090/sse
+mcp-tool-bindings:
+  - tool: get_market_data
+    server: market-data
+  - tool: get_fx_rates
+    server: fx-service
+---
+
+# Portfolio VaR Report
+
+## Instructions
+
+1. **Get positions from the database** — use `execute_code` to query positions from SQLite via env vars.
+
+2. **Get market data** — call `get_market_data` from the `market-data` MCP server with the list of symbols from step 1.
+
+3. **Get FX rates for cross-currency positions** — call `get_fx_rates` from the `fx-service` MCP server to convert non-USD positions.
+
+4. **Compute VaR** — use `execute_code` to run historical VaR simulation and generate the report.
+```
+
+In this example:
+- Step 2 explicitly routes `get_market_data` → `market-data` server
+- Step 3 explicitly routes `get_fx_rates` → `fx-service` server
+- The frontmatter `mcp-tool-bindings` field enforces those routes (not just "any server that has this tool")
+
+---
+
+#### Tenant-level override (recommended for production)
+
+Ops teams can redirect MCP endpoints without modifying skills by defining servers with the same name in tenant config (`config/tenants/{id}/mcp.json`). **Tenant config is the recommended best practice** for production deployments — it centralizes endpoint management, supports secrets, and enables environment separation (dev/staging/prod).
+
+```json
+// config/tenants/risk/mcp.json — overrides skill's "market-data" endpoint
+{
+  "servers": [
+    {
+      "name": "market-data",
+      "transport": "sse",
+      "url": "http://market-data-mcp.prod.internal:8080/sse"
+    }
+  ]
+}
+```
+
+**Merge rules:**
+
+| Scenario | Result |
+|----------|--------|
+| Skill has `mcp-servers`, no tenant `mcp.json` | Skill's URLs used directly — fully self-contained |
+| Tenant has `mcp.json`, skill has no `mcp-servers` | Tenant config used |
+| Both exist, same server name | **Tenant wins** — ops override without touching the skill |
+| Both exist, different server names | Both available — merged |
+
+**When to use which:**
+- **Skill-level `mcp-servers`:** Rapid prototyping, self-contained skills, single-tenant setups. Simpler — everything in one file.
+- **Tenant `mcp.json`:** Production deployments, multi-tenancy, when ops needs to control endpoints separately from skill authors.
+
+---
+
+## 6. Tenant Configuration (Optional)
+
+Tenant config is **entirely optional**. It adds value for environment separation, multi-tenancy, and externalizing secrets. You can skip it entirely for simple setups.
+
+### 6.1 resources.yaml — Sandbox Environment Variables
+
+When user code runs inside the sandbox, the framework reads `resources.yaml` and injects all listed env vars into the sandbox environment. Skill code can then use `os.environ["DB_PATH"]` without hardcoding connection strings.
 
 ```yaml
 # config/tenants/risk/resources.yaml
@@ -262,11 +385,13 @@ resource_aliases:
     KDB_PASS_REF: "vault:kdb/trading/password"
 ```
 
-These env vars are injected into the sandbox at runtime. Your skill code reads them via `os.environ`.
+**Multi-tenant use case:** A "risk" tenant connects to KDB+ on `db-risk.internal:5000`, an "equities" tenant connects to `db-eq.internal:5001`. Same skill code, different data sources — controlled entirely by which tenant's `resources.yaml` is loaded.
 
-### 5.3 MCP Servers
+**Single-tenant use case:** You can skip this entirely. Hardcode your DB connection in your skill code if that's simpler for your setup. The framework doesn't require it.
 
-Add MCP servers to your tenant's MCP config:
+### 6.2 mcp.json — Tenant MCP Servers
+
+Defines which MCP servers are available for a tenant. This is the **override layer** — it takes precedence over skill-level `mcp-servers` declarations when server names conflict.
 
 ```json
 // config/tenants/risk/mcp.json
@@ -281,11 +406,21 @@ Add MCP servers to your tenant's MCP config:
 }
 ```
 
-The `get_market_data` tool becomes available to skills that list it in `allowed-tools`.
+**Multi-tenant use case:** Different tenants can have different MCP server topologies — risk desk uses one market data provider, equities desk uses another.
+
+**Single-tenant use case:** If your skill already declares `mcp-servers` in its `SKILL.md`, you may not need tenant-level MCP config at all. Use tenant config when ops teams need to override endpoints (e.g., dev vs prod).
+
+### 6.3 When to Use What
+
+| Scenario | Agent YAML | resources.yaml | mcp.json |
+|----------|-----------|----------------|----------|
+| Prototyping a new skill | Required | Skip — hardcode connections | Skip — use `mcp-servers` in SKILL.md |
+| Dev vs prod environments | Required | Use — externalize connection strings | Optional — override skill MCP endpoints |
+| Multi-tenant deployment | Required | Use — different data sources per tenant | Use — different MCP topologies per tenant |
 
 ---
 
-## 6. Running Locally
+## 7. Running Locally
 
 ```bash
 # 1. Activate the environment
@@ -319,7 +454,7 @@ asyncio.run(test())
 
 ---
 
-## 7. Testing Your Skill
+## 8. Testing Your Skill
 
 ### Validate structure
 
@@ -332,6 +467,7 @@ skill = parse_skill_file(Path('skills/risk/portfolio-var/SKILL.md'))
 print(f'Skill: {skill.name}')
 print(f'Tags:  {skill.tags}')
 print(f'Tools: {skill.allowed_tools}')
+print(f'MCP:   {[s.name for s in skill.mcp_servers]}')
 "
 ```
 
@@ -355,12 +491,12 @@ print(f'VaR: \${result[\"var\"]:,.0f}')
 |---------|-----|
 | `ModuleNotFoundError` in sandbox | Check `scripts/requirements.txt` has the package; verify `scripts/` contains your `.py` files |
 | `KeyError: 'DB_HOST'` | Verify your resource alias is configured in tenant config and matches the env var name your code uses |
-| MCP tool not found | Confirm the tool name in `allowed-tools` matches exactly what the MCP server exposes |
+| MCP tool not found | Confirm the tool name in `allowed-tools` matches exactly what the MCP server exposes; check `mcp-servers` in SKILL.md or tenant `mcp.json` |
 | Skill not discovered | Check that your agent's `bound_skill_ids` includes your skill's `skill_id` (the path relative to `skills/`) |
 
 ---
 
-## 8. Deploying to Production
+## 9. Deploying to Production
 
 ```
 1. Create a PR adding your skill directory to the skills repo

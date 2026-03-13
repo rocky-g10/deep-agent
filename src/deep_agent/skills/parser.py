@@ -10,7 +10,7 @@ import frontmatter
 from frontmatter import Post
 
 from deep_agent.models import SkillContent
-from deep_agent.models.skills import SkillInput, SkillQuality
+from deep_agent.models.skills import MCPToolBinding, SkillInput, SkillMCPServer, SkillQuality
 
 REQUIRED_SKILL_FIELDS: tuple[str, ...] = (
     "name",
@@ -79,6 +79,34 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
             }
         )
 
+    raw_mcp_servers = metadata.get("mcp-servers", [])
+    mcp_servers: list[SkillMCPServer] = []
+    if isinstance(raw_mcp_servers, list):
+        for item in raw_mcp_servers:
+            if isinstance(item, dict) and "name" in item and "transport" in item:
+                mcp_servers.append(
+                    SkillMCPServer(
+                        **{k: v for k, v in item.items() if k in SkillMCPServer.model_fields}
+                    )
+                )
+    raw_mcp_tool_bindings = metadata.get("mcp-tool-bindings", [])
+    mcp_tool_bindings: list[MCPToolBinding] = []
+    if isinstance(raw_mcp_tool_bindings, list):
+        for item in raw_mcp_tool_bindings:
+            if not isinstance(item, dict):
+                continue
+            tool = item.get("tool")
+            server = item.get("server")
+            if (
+                isinstance(tool, str)
+                and tool.strip()
+                and isinstance(server, str)
+                and server.strip()
+            ):
+                mcp_tool_bindings.append(
+                    MCPToolBinding(tool_name=tool.strip(), server_name=server.strip())
+                )
+
     body = post.content or ""
     scripts_dir = path.parent / "scripts"
     scripts_path = str(scripts_dir.resolve()) if scripts_dir.is_dir() else ""
@@ -94,6 +122,8 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
         scripts_path=scripts_path,
         inputs=inputs,
         quality=quality,
+        mcp_servers=mcp_servers,
+        mcp_tool_bindings=mcp_tool_bindings,
     )
 
 

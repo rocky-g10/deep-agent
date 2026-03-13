@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 
+from deep_agent.mcp.config import MCPConfig, merge_mcp_configs
 from deep_agent.mcp.manager import MCPManager
 from deep_agent.models import (
     AgentEvent,
@@ -17,7 +18,7 @@ from deep_agent.models import (
     SkillSummary,
     TenantContext,
 )
-from deep_agent.models.skills import AgentSkillBindings
+from deep_agent.models.skills import AgentSkillBindings, MCPToolBinding, SkillMCPServer
 from deep_agent.runtime.llm_router import LLMRouter
 from deep_agent.runtime.protocol import RuntimeAdapter
 from deep_agent.sandbox.protocol import SandboxManager
@@ -55,6 +56,7 @@ class AgentOrchestrator:
         history: list[Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message and stream normalized runtime events."""
+        _temp_mcp: MCPManager | None = None
         try:
             if not skill_bindings.bound_skill_ids:
                 logger.warning(
@@ -89,7 +91,11 @@ class AgentOrchestrator:
             builtin_tools = self._build_builtin_tools(
                 context, scripts_dirs=scripts_dirs, timeout=skill_timeout
             )
-            mcp_tools = await self._get_mcp_tools()
+
+            skill_mcp = skill_content.mcp_servers if skill_content else []
+            skill_mcp_bindings = skill_content.mcp_tool_bindings if skill_content else []
+            mcp_tools, _temp_mcp = await self._resolve_mcp_tools(skill_mcp, skill_mcp_bindings)
+
             all_tools = builtin_tools + self._extra_tools + mcp_tools
             if allowed_tools is not None:
                 all_tools = _filter_tools(all_tools, allowed_tools)
@@ -113,6 +119,9 @@ class AgentOrchestrator:
         except Exception as exc:
             logger.exception("Orchestrator error")
             yield ErrorEvent(code="ORCHESTRATOR_ERROR", message=str(exc))
+        finally:
+            if _temp_mcp is not None:
+                await _temp_mcp.disconnect()
 
     def _build_builtin_tools(
         self,
@@ -132,18 +141,55 @@ class AgentOrchestrator:
         )
         return tools
 
-    async def _get_mcp_tools(self) -> list[BaseTool]:
-        """Return MCP tools if manager is configured and connected."""
-        if self._mcp_manager is None:
-            return []
+    async def _resolve_mcp_tools(
+        self,
+        skill_mcp_servers: list[SkillMCPServer],
+        skill_mcp_tool_bindings: list[MCPToolBinding],
+    ) -> tuple[list[BaseTool], MCPManager | None]:
+        """Resolve MCP tools from skill-level and/or tenant-level configs.
 
+        Returns a tuple of (tools, temp_manager).  *temp_manager* is non-None
+        only when a temporary MCPManager was created for skill-level servers;
+        the caller is responsible for disconnecting it.
+        """
+        has_tenant = self._mcp_manager is not None
+        has_skill = bool(skill_mcp_servers)
+
+        if not has_tenant and not has_skill:
+            return [], None
+
+        # Tenant-only — use the pre-configured manager (no temp manager)
+        if not has_skill:
+            assert self._mcp_manager is not None
+            try:
+                if not self._mcp_manager.connected:
+                    await self._mcp_manager.connect()
+                return await self._mcp_manager.get_tools(), None
+            except Exception as exc:
+                logger.warning("Failed to get MCP tools: %s", exc)
+                return [], None
+
+        # Skill-level servers present — merge with tenant config
+        tenant_config = self._mcp_manager.config if self._mcp_manager else MCPConfig()
+        merged = merge_mcp_configs(skill_mcp_servers, tenant_config)
+        _validate_mcp_tool_bindings(skill_mcp_tool_bindings, merged)
+
+        if not merged.servers:
+            return [], None
+
+        manager = MCPManager(merged)
         try:
-            if not self._mcp_manager.connected:
-                await self._mcp_manager.connect()
-            return await self._mcp_manager.get_tools()
+            await manager.connect()
+            if skill_mcp_tool_bindings:
+                tools_by_server = await manager.get_tools_by_server()
+                tools = _apply_mcp_tool_bindings(tools_by_server, skill_mcp_tool_bindings)
+            else:
+                tools = await manager.get_tools()
+            return tools, manager
         except Exception as exc:
             logger.warning("Failed to get MCP tools: %s", exc)
-            return []
+            await manager.disconnect()
+            return [], None
 
     def _build_system_prompt(
         self,
@@ -190,3 +236,66 @@ def _filter_tools(tools: list[BaseTool], allowed_tools: list[str]) -> list[BaseT
     """Filter tools by name against a skill's allowlist."""
     allowed_set = set(allowed_tools)
     return [tool for tool in tools if getattr(tool, "name", None) in allowed_set]
+
+
+def _validate_mcp_tool_bindings(
+    bindings: list[MCPToolBinding],
+    merged_config: MCPConfig,
+) -> None:
+    """Validate binding server names against merged skill+tenant MCP config."""
+    if not bindings:
+        return
+
+    servers = {server.name for server in merged_config.servers}
+    missing = sorted(
+        {
+            binding.server_name
+            for binding in bindings
+            if binding.server_name not in servers
+        }
+    )
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"Invalid mcp-tool-bindings: unknown server(s): {joined}")
+
+
+def _apply_mcp_tool_bindings(
+    tools_by_server: dict[str, list[BaseTool]],
+    bindings: list[MCPToolBinding],
+) -> list[BaseTool]:
+    """Apply explicit tool->server bindings while preserving fallback for unbound tools."""
+    bound_server_for_tool: dict[str, str] = {}
+    for binding in bindings:
+        existing = bound_server_for_tool.get(binding.tool_name)
+        if existing and existing != binding.server_name:
+            raise ValueError(
+                "Invalid mcp-tool-bindings: "
+                f"tool '{binding.tool_name}' is bound to multiple servers"
+            )
+        bound_server_for_tool[binding.tool_name] = binding.server_name
+
+    selected: list[BaseTool] = []
+
+    # Default behavior for unbound tools: include all discovered instances.
+    for tools in tools_by_server.values():
+        for tool in tools:
+            if getattr(tool, "name", None) not in bound_server_for_tool:
+                selected.append(tool)
+
+    # Bound tools: include only instances discovered from the bound server.
+    for tool_name, server_name in bound_server_for_tool.items():
+        matches = [
+            tool
+            for tool in tools_by_server.get(server_name, [])
+            if getattr(tool, "name", None) == tool_name
+        ]
+        if not matches:
+            logger.warning(
+                "Bound MCP tool '%s' was not discovered on server '%s'",
+                tool_name,
+                server_name,
+            )
+            continue
+        selected.extend(matches)
+
+    return selected

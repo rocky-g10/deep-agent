@@ -489,11 +489,11 @@ The agent's LLM prompt receives only resource alias names and descriptions (not 
 
 ### 4.4 MCP Adapters
 
-MCP (Model Context Protocol) adapters expose external tools to the agent via the `langchain-mcp-adapters` library. Each tenant has its own MCP configuration.
+MCP (Model Context Protocol) adapters expose external tools to the agent via the `langchain-mcp-adapters` library. MCP servers can be configured at **two levels**: directly in a skill's `SKILL.md` frontmatter (self-contained, simple) or in per-tenant `mcp.json` (centralized, recommended for production). Both approaches are fully supported; tenant config takes precedence when server names conflict.
 
-#### Configuration
+#### Configuration Sources (Priority Order)
 
-Per-tenant MCP config is a JSON file stored at `config/tenants/{tenant_id}/mcp.json`:
+1. **Tenant-level** (`config/tenants/{tenant_id}/mcp.json`) — recommended for production. Provides centralized control, secrets management, and environment separation. Overrides skill-level declarations on name conflicts.
 
 ```json
 {
@@ -513,12 +513,69 @@ Per-tenant MCP config is a JSON file stored at `config/tenants/{tenant_id}/mcp.j
 }
 ```
 
+2. **Skill-level** (`mcp-servers` in SKILL.md frontmatter) — enables self-contained skills that bundle their own MCP dependency. No tenant config required.
+
+```yaml
+# In SKILL.md frontmatter
+mcp-servers:
+  - name: market-data
+    transport: sse
+    url: http://localhost:8080/sse
+```
+
+#### Skill-Level MCP: Two Modes
+
+Skills can use MCP servers in two ways:
+
+**Mode 1 — Server only (discover all tools):** The skill declares a server and the orchestrator discovers all tools it exposes at runtime. The agent uses whichever tools are appropriate. Good for general-purpose servers.
+
+```yaml
+mcp-servers:
+  - name: market-data
+    transport: sse
+    url: http://localhost:8080/sse
+```
+
+**Mode 2 — Server + specific tool binding:** The skill declares servers AND explicitly binds specific steps to specific tools on specific servers. This is the most precise and self-documenting approach. Good for multi-server skills where each step uses a different data source.
+
+```yaml
+allowed-tools:
+  - execute_code
+  - get_market_data
+  - get_fx_rates
+mcp-servers:
+  - name: market-data
+    transport: sse
+    url: http://localhost:8080/sse
+  - name: fx-service
+    transport: sse
+    url: http://localhost:9090/sse
+mcp-tool-bindings:
+  - tool: get_market_data
+    server: market-data
+  - tool: get_fx_rates
+    server: fx-service
+```
+
+In Mode 2, bindings are declared in frontmatter via `mcp-tool-bindings` and enforced by the orchestrator.
+
+#### Merge Rules
+
+| Scenario | Result |
+|----------|--------|
+| Skill has `mcp-servers`, no tenant `mcp.json` | Skill's URLs used directly — fully self-contained |
+| Tenant has `mcp.json`, skill has no `mcp-servers` | Tenant config used |
+| Both exist, same server name | **Tenant wins** — ops can redirect without modifying the skill |
+| Both exist, different server names | Both available — merged |
+
 #### Lifecycle
 
-1. On session start, the orchestrator reads the tenant's `mcp.json`.
-2. `langchain-mcp-adapters` connects to each MCP server and discovers available tools.
-3. Discovered tools are merged with skill-defined `allowed_tools` — a tool is only available to the agent if the matched skill permits it.
-4. Tools are passed to `RuntimeAdapter.create_agent()` alongside built-in tools (sandbox, DB query).
+1. On session start, the orchestrator reads the tenant's `mcp.json` (if present) and the matched skill's `mcp-servers` (if declared).
+2. Server configs are merged (tenant takes precedence on name conflicts).
+3. `langchain-mcp-adapters` connects to each MCP server and discovers available tools.
+4. In Mode 2, explicit tool→server bindings from `mcp-tool-bindings` are enforced; in Mode 1, all discovered tools from the named server are available.
+5. Discovered tools are merged with skill-defined `allowed_tools` — a tool is only available to the agent if the matched skill permits it.
+6. Tools are passed to `RuntimeAdapter.create_agent()` alongside built-in tools (sandbox, DB query).
 
 #### Skill-Bundled Scripts
 
@@ -642,6 +699,8 @@ skill-name/
 | `inputs` | list[object] | no | Named parameters the user should provide |
 | `quality.timeout` | int | no | Max execution time in seconds (default: 60) |
 | `quality.max-retries` | int | no | Auto-retry on sandbox failure (default: 1) |
+| `mcp-servers` | list[object] | no | MCP servers the skill needs (see §4.4). Each entry: `name`, `transport`, `url` (or `command` for stdio). Enables self-contained skills without tenant config. |
+| `mcp-tool-bindings` | list[object] | no | Explicit tool→server routing (see §4.4 Mode 2). Each entry: `tool` (tool name), `server` (server name from `mcp-servers`). Enforced by the orchestrator. |
 | `quality.validation` | string | no | Natural-language acceptance criteria the agent self-checks |
 
 ### 5.2 Authoring Guidelines for Business Desks
