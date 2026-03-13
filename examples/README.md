@@ -1,88 +1,134 @@
-# Deep Agent — Runnable Example
+# Deep Agent — End-to-End Example
 
-> **Time to first result:** ~2 minutes. No Docker, no API keys, no external databases.
+A self-contained demo that exercises the **full deep-agent pipeline** through the WebSocket API. No LLM API key required.
 
-## What This Demonstrates
+## What It Demonstrates
 
-A **Portfolio VaR (Value at Risk)** agent that shows all three integration patterns:
-
-| Pattern | What | How |
-|---------|------|-----|
-| **A — Custom Code Import** | Bundled `risk_calc.py` module | `from risk_calc import calculate_var` in sandbox |
-| **B — Database Query** | Positions from SQLite via env vars | `os.environ["DB_PATH"]` injected by framework |
-| **C — MCP Tool Call** | Market data from mock MCP server | `get_market_data` tool (mock returns synthetic data) |
+1. **WebSocket API** — Real uvicorn server on a random port, client connects via `websockets`
+2. **Agent Resolution** — `risk-desk-agent` loaded from `agents/risk-desk-agent.yaml`
+3. **Tenant Context** — Resource env vars (`DB_PATH`) loaded from `tenants/risk/resources.yaml`
+4. **Skill Orchestration** — Orchestrator matches `risk/portfolio-var` skill by tag overlap
+5. **Sandbox Execution** — Python code runs in a subprocess sandbox with env var injection
+6. **PYTHONPATH Injection** — `risk_calc.py` from the skill's `scripts/` dir is importable
+7. **Multi-Turn Sessions** — Two turns on the same WebSocket connection (95% then 99% VaR)
+8. **Mock LLM** — `ScriptedRuntime` replays predetermined code blocks (CI-safe, no API key)
 
 ## Quick Start
 
 ```bash
-# 1. From the project root, activate your venv
-cd deep-agent
-source .venv/bin/activate
-pip install -e .
-
-# 2. Run the example (seeds data + computes VaR + generates chart)
-python -m examples.run_example
+# From the project root:
+python -m examples.run
 ```
 
-**Expected output:**
+## Expected Output
+
 ```
-Seeded /tmp/portfolio.db with 3 positions and 756 daily prices.
+============================================================
+  Deep Agent — End-to-End Demo
+============================================================
 
---- Portfolio Positions (EQ-MACRO-1) ---
-  sym    qty  avg_cost
- AAPL  500.0    178.50
- MSFT  300.0    415.20
- GOOG  200.0    141.80
+  Seeding database...
+  Starting server on 127.0.0.1:xxxxx...
+  Server healthy.
 
---- VaR Results ---
-Portfolio:           EQ-MACRO-1
-1-Day 95% VaR:      $4,XXX
-Expected Shortfall:  $5,XXX
-P&L samples:         252
+  SESSION <uuid>
 
-Chart saved to: examples/output/var_chart.png
+============================================================
+  Turn 1: Calculate 95% VaR
+============================================================
+  SKILL MATCH risk/portfolio-var (confidence: 0.75)
+  TOOL CALL execute_code
+    import sqlite3, os | import pandas as pd | ...
+  TOOL RESULT
+    Portfolio Positions (EQ-MACRO-1):
+    sym  qty  avg_cost
+    AAPL  500    178.5
+    MSFT  300    415.2
+    GOOG  200    141.8
+
+    1-Day 95% VaR: $X,XXX.XX
+    Expected Shortfall: $X,XXX.XX
+    P&L samples: 252
+  COMPLETE (tokens_used=0)
+------------------------------------------------------------
+
+============================================================
+  Turn 2: Calculate 99% VaR
+============================================================
+  SKILL MATCH risk/portfolio-var (confidence: 0.75)
+  TOOL CALL execute_code
+    ...
+  TOOL RESULT
+    ...
+    1-Day 99% VaR: $X,XXX.XX
+    ...
+  COMPLETE (tokens_used=0)
+
+============================================================
+  Demo Complete
+============================================================
+  Two-turn VaR calculation over WebSocket — no LLM API key required.
+```
+
+## Architecture
+
+```
+python -m examples.run
+  |
+  +-- seed SQLite (/tmp/portfolio.db)
+  +-- create_app(settings, config_root=examples/, runtime=ScriptedRuntime)
+  +-- start uvicorn on 127.0.0.1:{random_port}
+  +-- websockets.connect("ws://127.0.0.1:{port}/ws/chat?tenant_id=risk&agent_id=risk-desk-agent")
+  |
+  Server-side on connect:
+  |  +-- build_tenant_context("risk") -> resource_env with DB_PATH
+  |  +-- load_agent_bindings("risk-desk-agent") -> bound to risk/portfolio-var
+  |  +-- session_manager.create() -> Session
+  |  +-- send session_started
+  |
+  Turn 1: "Calculate the 1-day 95% VaR for portfolio EQ-MACRO-1"
+  |  +-- orchestrator.handle_message()
+  |     +-- skill_engine.match() -> risk/portfolio-var
+  |     +-- skill_engine.load() -> SkillContent with scripts_path
+  |     +-- create_execute_code_tool(sandbox, tenant, scripts_dirs)
+  |     +-- ScriptedRuntime.stream() -> executes turn 1 code in sandbox
+  |     +-- yield: skill_match, tool_call, tool_result, agent_chunk, agent_complete
+  |
+  Turn 2: "What about at 99% confidence?"
+     +-- Same flow, ScriptedRuntime uses turn 2 code (confidence=0.99)
+     +-- Session history includes turn 1 messages (multi-turn proof)
 ```
 
 ## File Structure
 
 ```
 examples/
-├── run_example.py              ← One-command launcher
-├── seed_data.py                ← Seeds SQLite with portfolio data
-├── mock_mcp_server.py          ← Mock MCP server (market data)
-├── docker-compose.yml          ← Optional infrastructure
-├── README.md                   ← This file
+├── __init__.py              # Package marker
+├── __main__.py              # python -m examples entry point
+├── README.md                # This file
+├── run.py                   # Main demo: server + WebSocket client
+├── scripted_runtime.py      # Mock RuntimeAdapter (no LLM needed)
+├── display.py               # ANSI-colored event pretty-printer
+├── seed_data.py             # Seeds SQLite with sample portfolio data
 ├── agents/
-│   └── risk-desk-agent.yaml    ← Agent skill bindings
+│   └── risk-desk-agent.yaml # Agent -> skill bindings
 ├── tenants/
 │   └── risk/
-│       ├── resources.yaml      ← Resource aliases (env vars)
-│       └── mcp.json            ← MCP server config
-├── skills/
-│   └── risk/
-│       └── portfolio-var/
-│           ├── SKILL.md        ← Skill definition
-│           └── scripts/
-│               ├── risk_calc.py      ← VaR calculation module
-│               └── requirements.txt  ← Skill dependencies
-├── database/                   ← Example DatabaseRegistry (moved from core)
-├── tools/                      ← Example tools (moved from core)
-└── tests/                      ← Tests for example code
+│       └── resources.yaml   # DB_PATH env var mapping
+└── skills/
+    └── risk/
+        └── portfolio-var/
+            ├── SKILL.md     # Skill definition (tags, allowed-tools)
+            └── scripts/
+                ├── risk_calc.py      # VaR calculation module
+                └── requirements.txt  # Script dependencies
 ```
 
-## How It Maps to the Framework
+## Extending the Example
 
-| Framework Concept | Example Implementation |
-|-------------------|----------------------|
-| `TenantContext.resource_env` | `tenants/risk/resources.yaml` → `DB_PATH` env var |
-| `AgentSkillBindings` | `agents/risk-desk-agent.yaml` → binds `risk/portfolio-var` |
-| Skill scripts (AgentSkills spec) | `skills/risk/portfolio-var/scripts/risk_calc.py` |
-| MCP server config | `tenants/risk/mcp.json` → `mock_mcp_server.py` |
-| `execute_code` tool | Framework core — runs Python in sandbox with env vars |
+- **Real LLM**: Replace `ScriptedRuntime` with `LangGraphAdapter` and set a real `OPENAI_API_KEY`
+- **Add MCP**: Create `tenants/risk/mcp.json` with server configs, add `get_market_data` to allowed-tools
+- **New skills**: Add a `SKILL.md` under `skills/`, bind it in the agent YAML
+- **New tenants**: Add `tenants/{name}/resources.yaml` with resource env vars
 
-## Next Steps
-
-- Replace SQLite with a real database (KDB+, ClickHouse, etc.) by updating `resources.yaml`
-- Replace the mock MCP server with a real market data provider
-- Add more skills to `agents/risk-desk-agent.yaml`
-- See [docs/DEVELOPER_GUIDE.md](../docs/DEVELOPER_GUIDE.md) for the full guide
+See [docs/DEVELOPER_GUIDE.md](../docs/DEVELOPER_GUIDE.md) for the full framework reference.

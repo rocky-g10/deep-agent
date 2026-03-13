@@ -1,0 +1,7 @@
+# Agent skill bindings for the risk desk agent.
+# Declares which skills this agent can discover and use.
+# Skills are looked up from the central skills/ registry.
+agent_id: "risk-desk-agent"
+bound_skill_ids:
+  - "risk/portfolio-var"
+  - "common/db-query"
