@@ -2,8 +2,8 @@
   "servers": [
     {
       "name": "market-data-mock",
-      "transport": "stdio",
-      "command": ["python", "-m", "examples.mock_mcp_server"]
+      "transport": "sse",
+      "url": "http://market-data-mcp.internal:8080/sse"
     }
   ]
 }

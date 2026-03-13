@@ -38,13 +38,6 @@ pytest tests/
 RUN_MCP_INTEGRATION=1 pytest tests/integration/test_mcp_manager.py
 ```
 
-## Run the Example
-
-```bash
-# Portfolio VaR example (no API key needed)
-python -m examples.run_example
-```
-
 ## Architecture
 
 See [docs/PRD.md](docs/PRD.md) for the full product specification and [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for skill authoring.

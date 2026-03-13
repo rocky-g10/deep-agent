@@ -1,13 +1,12 @@
 """Seed a local SQLite database with sample portfolio and market data.
 
-Usage: python -m examples.seed_data
 Creates /tmp/portfolio.db with positions and historical prices.
 """
 from __future__ import annotations
 
-import sqlite3
-import random
 import os
+import random
+import sqlite3
 
 DB_PATH = os.environ.get("DB_PATH", "/tmp/portfolio.db")
 
@@ -67,7 +66,6 @@ def seed() -> None:
     cur.executemany("INSERT INTO daily_prices VALUES (?, ?, ?, ?)", rows)
     conn.commit()
     conn.close()
-    print(f"Seeded {DB_PATH} with {len(positions)} positions and {len(rows)} daily prices.")
 
 
 if __name__ == "__main__":

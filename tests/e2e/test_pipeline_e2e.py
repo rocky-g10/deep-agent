@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -76,10 +75,7 @@ class DeterministicRuntime:
 @pytest.fixture(autouse=True)
 def seed_db() -> None:
     """Seed SQLite with example portfolio data."""
-    project_root = Path(__file__).resolve().parent.parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    from examples.seed_data import seed
+    from tests.support.seed_data import seed
 
     seed()
 
