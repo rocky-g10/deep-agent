@@ -1409,6 +1409,7 @@ merge to main
 | `SandboxManager` | `PythonSubprocessSandbox` backend with resource limits |
 | Resource Configuration | Generic resource env-var injection via tenant config |
 | Example skills | `data-query/db-query`, `equities/zscore-monitor` — self-contained with scripts (ClickHouse z-score demo) |
+| `scripts/invoke_agent.py` | CLI script for invoking the agent in isolation — no API server required. Useful for skill development and debugging. |
 | End-to-end test | User asks "Show me z-scores for AAPL volume" → skill executes Python in sandbox → gets table + chart |
 
 **Not in Phase 1:** Auth, multi-tenancy, persistence, audit logging, visualization skill (charts work via zscore-monitor, but no standalone viz skill yet).

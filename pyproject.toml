@@ -50,6 +50,9 @@ select = [
   "UP",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402"]
+
 [tool.mypy]
 python_version = "3.12"
 mypy_path = ["src"]

@@ -422,17 +422,51 @@ Defines which MCP servers are available for a tenant. This is the **override lay
 
 ## 7. Running Locally
 
+The fastest way to test your skill is `scripts/test_agent.py` — a single-command invoke that wires up the full orchestrator (SkillEngine, LLMRouter, LangGraphAdapter, sandbox) without starting a server.
+
 ```bash
 # 1. Activate the environment
 source .venv/bin/activate
 
 # 2. Set required env vars
 export OPENAI_API_KEY="your-key"
+```
 
-# 3. Start the dev server
+### 7.1 test_agent.py — Recommended Starting Point
+
+```bash
+# Run with all discovered skills
+python scripts/test_agent.py "What tables are available in the database?"
+
+# Test a specific skill
+python scripts/test_agent.py --skill risk/portfolio-var "What's the 1-day 95% VaR for EQ-MACRO-1?"
+
+# Stream tokens as they arrive
+python scripts/test_agent.py --stream "Explain z-scores"
+
+# Bind multiple skills
+python scripts/test_agent.py --skill risk/portfolio-var --skill data-query/db-query "Show positions"
+
+# Inject resource env vars (simulates tenant config without files)
+python scripts/test_agent.py \
+  --resource "kdb-trading:KDB_HOST=localhost,KDB_PORT=5000" \
+  "Show top positions"
+
+# Override the model via environment
+OPENAI_MODEL=gpt-4.1 python scripts/test_agent.py "Hello"
+```
+
+The script prints structured output — skill match, tool calls with inputs, tool results, and the final agent response with token count. Use `--stream` to see tokens as they arrive.
+
+### 7.2 WebSocket Server (Full API)
+
+For integration testing or when you need the full WebSocket API:
+
+```bash
+# Start the dev server
 python -m deep_agent.api.main
 
-# 4. Send a test query (separate terminal)
+# Send a test query (separate terminal)
 python -c "
 import asyncio, json, websockets
 
@@ -496,7 +530,96 @@ print(f'VaR: \${result[\"var\"]:,.0f}')
 
 ---
 
-## 9. Deploying to Production
+## 9. Testing the Agent in Isolation
+
+Before spinning up the full WebSocket server, use `scripts/invoke_agent.py` to test the entire agent stack — SkillEngine, skill matching, prompt injection, LLM, tool calls, and sandbox execution — with a single command.
+
+This is the recommended way to iterate on skills. Full app startup (FastAPI + WebSocket) adds overhead and noise when all you need is to verify a skill matches, loads, and executes correctly.
+
+### Prerequisites
+
+```bash
+export OPENAI_API_KEY="sk-..."       # required
+export OPENAI_MODEL="gpt-4o"         # optional — overrides default (gpt-5)
+```
+
+### Basic usage
+
+```bash
+# Stream the agent response token by token (default)
+python scripts/invoke_agent.py "Show me z-scores for AAPL volume over 60 days"
+
+# Use a specific agent binding (controls which skills are available)
+python scripts/invoke_agent.py --agent risk-desk-agent \
+    "What is the 1-day 95% VaR for portfolio EQ-MACRO-1?"
+
+# Print final answer only (no streaming)
+python scripts/invoke_agent.py --no-stream "List all available skills"
+```
+
+### Example output
+
+```
+============================================================
+  Agent : default
+  Prompt: Show me z-scores for AAPL volume over 60 days
+============================================================
+
+[skill matched] equities/zscore-monitor (score: 0.67)
+[tool call] execute_code({"code": "import os\nimport clickhouse_connect\n..."})
+[tool result] Symbol: AAPL | Z-Score: 1.84 | Outliers: 2...
+Analysing AAPL volume using a 60-day rolling window...
+The current z-score is 1.84 — within normal range.
+
+[done] tokens used: 842
+```
+
+### Customising the script
+
+Three things developers typically change:
+
+1. **Agent bindings** — Edit the `AGENT_CONFIGS` dict at the top of the script to add a new agent or change which skills it can use:
+   ```python
+   AGENT_CONFIGS["my-agent"] = AgentSkillBindings(
+       agent_id="my-agent",
+       bound_skill_ids=("equities/my-new-skill", "common/db-query"),
+   )
+   ```
+
+2. **Resource env vars** — Populate `resource_env` in the `TenantContext` to inject DB credentials into the sandbox:
+   ```python
+   context = TenantContext(
+       tenant_id="local-dev",
+       user_id="developer",
+       resource_env={
+           "kdb-trading": {
+               "KDB_HOST": "localhost",
+               "KDB_PORT": "5000",
+           },
+       },
+   )
+   ```
+
+3. **MCP servers** — Pass an `MCPManager` to the orchestrator to attach MCP tool servers:
+   ```python
+   from deep_agent.mcp.manager import MCPManager
+   from deep_agent.mcp.config import MCPConfig, MCPServerConfig
+
+   mcp_config = MCPConfig(servers=[
+       MCPServerConfig(name="market-data", transport="sse",
+                       url="http://localhost:8080/sse"),
+   ])
+   mcp_manager = MCPManager(mcp_config)
+   orchestrator = AgentOrchestrator(..., mcp_manager=mcp_manager)
+   ```
+
+### How it maps to the full app
+
+The script uses the exact same code paths as the WebSocket API — same orchestrator, same runtime, same sandbox. The only difference is that events are printed to stdout instead of streamed over WebSocket.
+
+---
+
+## 10. Deploying to Production
 
 ```
 1. Create a PR adding your skill directory to the skills repo
