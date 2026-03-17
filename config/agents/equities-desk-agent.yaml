@@ -1,0 +1,7 @@
+# Agent skill bindings for the equities trading desk agent.
+# This agent can chat with the trade database, monitor z-scores, and run ad-hoc queries.
+agent_id: "equities-desk-agent"
+bound_skill_ids:
+  - "equities/trade-analytics"
+  - "equities/zscore-monitor"
+  - "common/db-query"

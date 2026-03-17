@@ -1,0 +1,11 @@
+# Resource aliases for the equities tenant.
+# Injected as env vars into the sandbox at runtime.
+# Switch between dev / prod by deploying different resource files.
+resource_aliases:
+  ch-equities:
+    DB_HOST: "clickhouse.equities.internal"
+    DB_PORT: "9000"
+    DB_USER: "reader"
+    DB_PASS: ""
+    DB_NAME: "equities"
+    DB_ENGINE: "clickhouse"
