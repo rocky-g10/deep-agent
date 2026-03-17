@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
-from deep_agent.config import AppSettings, EnvironmentSettingsProvider
+from deep_agent.config import AppSettings, EnvironmentSettingsProvider, get_settings
 
 
 def test_app_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,3 +58,22 @@ def test_environment_settings_provider(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert isinstance(settings, AppSettings)
     assert settings.openai_api_key.get_secret_value() == "sk-test"
+
+
+def test_app_settings_missing_api_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPENAI_API_KEY should be required."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(ValidationError):
+        AppSettings()  # type: ignore[call-arg]
+
+
+def test_get_settings_returns_same_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_settings should cache and return the same instance on repeated calls."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-cached")
+    get_settings.cache_clear()
+
+    first = get_settings()
+    second = get_settings()
+
+    assert first is second
