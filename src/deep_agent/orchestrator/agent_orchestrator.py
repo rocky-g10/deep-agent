@@ -27,6 +27,9 @@ from deep_agent.tools.execute_code import create_execute_code_tool
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_MULTI_SKILL_TOP_K = 3
+_DEFAULT_MULTI_SKILL_MIN_SCORE = 0.01
+
 
 class AgentOrchestrator:
     """Coordinates skills, tools, and runtime streaming for one user message."""
@@ -65,35 +68,45 @@ class AgentOrchestrator:
                 )
 
             all_skills = self._skill_engine.discover(skill_bindings)
-            matched_skills = self._skill_engine.match(message, skill_bindings, top_k=1)
+            matched_skills = self._skill_engine.match(
+                message,
+                skill_bindings,
+                top_k=_DEFAULT_MULTI_SKILL_TOP_K,
+                min_score=_DEFAULT_MULTI_SKILL_MIN_SCORE,
+            )
 
-            skill_content: SkillContent | None = None
+            active_skills: list[SkillContent] = []
             allowed_tools: list[str] | None = None
 
-            if matched_skills:
-                top_match = matched_skills[0]
-                yield SkillMatchEvent(skill_id=top_match.skill_id, confidence=top_match.score)
+            for match in matched_skills:
+                yield SkillMatchEvent(skill_id=match.skill_id, confidence=match.score)
                 try:
-                    skill_content = self._skill_engine.load(top_match.skill_id, skill_bindings)
-                    allowed_tools = list(skill_content.allowed_tools)
+                    content = self._skill_engine.load(match.skill_id, skill_bindings)
+                    active_skills.append(content)
                 except Exception as exc:
-                    logger.warning("Failed to load matched skill '%s': %s", top_match.skill_id, exc)
+                    logger.warning("Failed to load matched skill '%s': %s", match.skill_id, exc)
+
+            scripts_dirs: list[str] | None = None
+            skill_timeout: int | None = None
+            skill_mcp: list[SkillMCPServer] = []
+            skill_mcp_bindings: list[MCPToolBinding] = []
+            if active_skills:
+                allowed_tools = sorted({tool for skill in active_skills for tool in skill.allowed_tools})
+                scripts_list = [skill.scripts_path for skill in active_skills if skill.scripts_path]
+                scripts_dirs = scripts_list if scripts_list else None
+                max_timeout = max(skill.quality.timeout for skill in active_skills)
+                skill_timeout = max_timeout if max_timeout > 60 else None
+                for skill in active_skills:
+                    skill_mcp.extend(skill.mcp_servers)
+                    skill_mcp_bindings.extend(skill.mcp_tool_bindings)
+
+            primary_skill = active_skills[0] if active_skills else None
 
             llm_config = self._llm_router.resolve(context)
-            skill_timeout: int | None = None
-            if skill_content is not None and skill_content.quality.timeout != 60:
-                skill_timeout = skill_content.quality.timeout
-            scripts_dirs = (
-                [skill_content.scripts_path]
-                if skill_content and skill_content.scripts_path
-                else None
-            )
             builtin_tools = self._build_builtin_tools(
                 context, scripts_dirs=scripts_dirs, timeout=skill_timeout
             )
 
-            skill_mcp = skill_content.mcp_servers if skill_content else []
-            skill_mcp_bindings = skill_content.mcp_tool_bindings if skill_content else []
             mcp_tools, _temp_mcp = await self._resolve_mcp_tools(skill_mcp, skill_mcp_bindings)
 
             all_tools = builtin_tools + self._extra_tools + mcp_tools
@@ -102,7 +115,7 @@ class AgentOrchestrator:
 
             system_prompt = self._build_system_prompt(
                 context=context,
-                skill_content=skill_content,
+                skill_content=primary_skill,
                 all_skills=all_skills,
             )
 

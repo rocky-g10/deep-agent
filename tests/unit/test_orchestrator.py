@@ -21,18 +21,31 @@ from deep_agent.models.skills import AgentSkillBindings
 from deep_agent.orchestrator.agent_orchestrator import AgentOrchestrator, _filter_tools
 
 
+def _make_skill_content(skill_match: SkillSummary) -> MagicMock:
+    """Build a realistic skill content mock for orchestrator tests."""
+    skill_content = MagicMock()
+    skill_content.name = skill_match.name
+    skill_content.skill_id = skill_match.skill_id
+    skill_content.body = "## Instructions\nDo stuff."
+    skill_content.allowed_tools = ["execute_code"]
+    skill_content.scripts_path = ""
+    skill_content.quality.timeout = 60
+    skill_content.mcp_servers = []
+    skill_content.mcp_tool_bindings = []
+    return skill_content
+
+
 def _mock_skill_engine(matches: list[SkillSummary] | None = None) -> MagicMock:
     engine = MagicMock()
     engine.discover.return_value = matches or []
     engine.match.return_value = matches or []
     if matches:
-        skill_content = MagicMock()
-        skill_content.name = matches[0].name
-        skill_content.skill_id = matches[0].skill_id
-        skill_content.body = "## Instructions\nDo stuff."
-        skill_content.allowed_tools = ["execute_code"]
-        skill_content.scripts_path = ""
-        engine.load.return_value = skill_content
+        skill_by_id = {match.skill_id: _make_skill_content(match) for match in matches}
+
+        def load_side_effect(skill_id: str, *_args: Any, **_kwargs: Any) -> MagicMock:
+            return skill_by_id[skill_id]
+
+        engine.load.side_effect = load_side_effect
     return engine
 
 
@@ -79,6 +92,93 @@ async def test_handle_message_yields_skill_match_first(
 
 
 @pytest.mark.asyncio
+async def test_multi_match_yields_multiple_skill_match_events(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
+    """Multiple matched skills should emit multiple skill_match events first."""
+    skill_matches = [
+        SkillSummary(
+            skill_id="common/db-query",
+            name="db-query",
+            description="Query DB",
+            tags=["database"],
+            score=0.8,
+        ),
+        SkillSummary(
+            skill_id="equities/zscore-monitor",
+            name="zscore-monitor",
+            description="Monitor z-scores",
+            tags=["zscore"],
+            score=0.6,
+        ),
+    ]
+    engine = _mock_skill_engine(skill_matches)
+
+    runtime = MagicMock()
+    runtime.create_agent.return_value = MagicMock()
+    runtime.stream = _fake_stream
+
+    orchestrator = AgentOrchestrator(
+        skill_engine=engine,
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+    )
+
+    events = [
+        event
+        async for event in orchestrator.handle_message(
+            "query and zscore", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
+
+    skill_events = [event for event in events if event.type == "skill_match"]
+    assert len(skill_events) == 2
+    assert events[0].type == "skill_match"
+    assert events[1].type == "skill_match"
+    assert events[2].type == "agent_chunk"
+
+
+@pytest.mark.asyncio
+async def test_single_skill_backward_compat(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
+    """Single-skill match should still produce one skill_match and singular prompt."""
+    skill_match = SkillSummary(
+        skill_id="common/db-query",
+        name="db-query",
+        description="Query DB",
+        tags=["database"],
+        score=0.8,
+    )
+    engine = _mock_skill_engine([skill_match])
+
+    runtime = MagicMock()
+    runtime.create_agent.return_value = MagicMock()
+    runtime.stream = _fake_stream
+
+    orchestrator = AgentOrchestrator(
+        skill_engine=engine,
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+    )
+
+    events = [
+        event
+        async for event in orchestrator.handle_message(
+            "query db", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
+
+    assert len([event for event in events if event.type == "skill_match"]) == 1
+    system_prompt = runtime.create_agent.call_args.kwargs["system_prompt"]
+    assert "## Active Skill: db-query" in system_prompt
+
+
+@pytest.mark.asyncio
 async def test_handle_message_no_skill_match_no_filter(
     tenant_equities: TenantContext,
     skill_bindings: AgentSkillBindings,
@@ -107,6 +207,62 @@ async def test_handle_message_no_skill_match_no_filter(
     assert not any(event.type == "skill_match" for event in events)
     tools = runtime.create_agent.call_args.kwargs["tools"]
     assert len(tools) >= 1
+
+
+@pytest.mark.asyncio
+async def test_skill_load_failure_skips_gracefully(
+    tenant_equities: TenantContext,
+    skill_bindings: AgentSkillBindings,
+) -> None:
+    """A failed load for one matched skill should not block remaining loaded skills."""
+    skill_matches = [
+        SkillSummary(
+            skill_id="common/db-query",
+            name="db-query",
+            description="Query DB",
+            tags=["database"],
+            score=0.8,
+        ),
+        SkillSummary(
+            skill_id="equities/zscore-monitor",
+            name="zscore-monitor",
+            description="Monitor z-scores",
+            tags=["zscore"],
+            score=0.6,
+        ),
+    ]
+    engine = _mock_skill_engine(skill_matches)
+
+    original_side_effect = engine.load.side_effect
+
+    def load_side_effect(skill_id: str, *args: Any, **kwargs: Any) -> Any:
+        if skill_id == "equities/zscore-monitor":
+            raise RuntimeError("load failed")
+        return original_side_effect(skill_id, *args, **kwargs)
+
+    engine.load.side_effect = load_side_effect
+
+    runtime = MagicMock()
+    runtime.create_agent.return_value = MagicMock()
+    runtime.stream = _fake_stream
+
+    orchestrator = AgentOrchestrator(
+        skill_engine=engine,
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+    )
+
+    events = [
+        event
+        async for event in orchestrator.handle_message(
+            "query and zscore", tenant_equities, skill_bindings=skill_bindings
+        )
+    ]
+
+    assert len([event for event in events if event.type == "skill_match"]) == 2
+    system_prompt = runtime.create_agent.call_args.kwargs["system_prompt"]
+    assert "## Active Skill: db-query" in system_prompt
 
 
 @pytest.mark.asyncio
