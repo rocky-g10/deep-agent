@@ -186,6 +186,13 @@ def test_parse_reference_skills_have_inputs_and_quality() -> None:
     assert skill.quality.timeout == 60
 
 
+def test_db_query_skill_has_scripts_dir() -> None:
+    """db-query should resolve a non-empty scripts_path."""
+    skill = parse_skill_file(Path("skills/common/db-query/SKILL.md"))
+
+    assert skill.scripts_path
+
+
 def test_missing_required_field_raises_skill_parse_error(tmp_path: Path) -> None:
     """Parser should reject frontmatter missing required keys."""
     skill_path = tmp_path / "skills" / "equities" / "missing" / "SKILL.md"
