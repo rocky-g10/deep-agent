@@ -138,6 +138,42 @@ def test_match_query_database_ranks_db_query_first(
     assert matched[0].skill_id == "common/db-query"
 
 
+def test_min_score_filters_low_scoring(
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
+) -> None:
+    """min_score should drop low-scoring matches from the result set."""
+    engine = SkillEngine(skills_root=temp_skills_root)
+
+    matched = engine.match("equities zscore volume", skill_bindings, top_k=3, min_score=0.4)
+
+    assert len(matched) == 1
+    assert matched[0].skill_id == "equities/zscore-monitor"
+    assert matched[0].score >= 0.4
+
+
+def test_min_score_zero_returns_all(
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
+) -> None:
+    """min_score=0 should preserve current behavior and return top_k results."""
+    engine = SkillEngine(skills_root=temp_skills_root)
+
+    matched = engine.match("query database", skill_bindings, top_k=2, min_score=0.0)
+
+    assert len(matched) == 2
+    assert matched[0].skill_id == "common/db-query"
+
+
+def test_min_score_filters_all_when_none_match(
+    temp_skills_root: Path, skill_bindings: AgentSkillBindings
+) -> None:
+    """When no match clears the threshold, an empty list should be returned."""
+    engine = SkillEngine(skills_root=temp_skills_root)
+
+    matched = engine.match("totally unrelated tokens", skill_bindings, top_k=2, min_score=0.01)
+
+    assert matched == []
+
+
 def test_load_returns_full_skill_content(
     temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:

@@ -61,7 +61,13 @@ class SkillEngine:
             for skill in bound
         ]
 
-    def match(self, query: str, bindings: AgentSkillBindings, top_k: int = 5) -> list[SkillSummary]:
+    def match(
+        self,
+        query: str,
+        bindings: AgentSkillBindings,
+        top_k: int = 5,
+        min_score: float = 0.0,
+    ) -> list[SkillSummary]:
         """Return top matching skills ranked by tag overlap with query tokens."""
         bound = self._bound_skills(bindings)
         query_tokens = _tokenize(query)
@@ -70,6 +76,8 @@ class SkillEngine:
         ]
         scored.sort(key=lambda item: (-item[0], item[1].skill_id))
         top = scored[:top_k] if top_k > 0 else []
+        if min_score > 0.0:
+            top = [(score, skill) for score, skill in top if score >= min_score]
 
         result = [
             SkillSummary(
