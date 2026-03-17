@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,8 +18,17 @@ from deep_agent.models import (
     SkillSummary,
     TenantContext,
 )
-from deep_agent.models.skills import AgentSkillBindings
-from deep_agent.orchestrator.agent_orchestrator import AgentOrchestrator, _filter_tools
+from deep_agent.models.skills import (
+    AgentSkillBindings,
+    MCPToolBinding,
+    SkillContent,
+    SkillMCPServer,
+)
+from deep_agent.orchestrator.agent_orchestrator import (
+    AgentOrchestrator,
+    _filter_tools,
+    _merge_skill_contents,
+)
 
 
 def _make_skill_content(skill_match: SkillSummary) -> MagicMock:
@@ -33,6 +43,30 @@ def _make_skill_content(skill_match: SkillSummary) -> MagicMock:
     skill_content.mcp_servers = []
     skill_content.mcp_tool_bindings = []
     return skill_content
+
+
+def _skill_content_model(
+    *,
+    skill_id: str,
+    allowed_tools: list[str] | None = None,
+    scripts_path: str = "",
+    timeout: int = 60,
+    mcp_servers: list[SkillMCPServer] | None = None,
+    mcp_tool_bindings: list[MCPToolBinding] | None = None,
+) -> SkillContent:
+    return SkillContent(
+        skill_id=skill_id,
+        name=skill_id.split("/")[-1],
+        description=f"{skill_id} description",
+        version="1.0.0",
+        tags=["test"],
+        allowed_tools=allowed_tools or ["execute_code"],
+        body=f"Body for {skill_id}",
+        scripts_path=scripts_path,
+        mcp_servers=mcp_servers or [],
+        mcp_tool_bindings=mcp_tool_bindings or [],
+        quality={"timeout": timeout},
+    )
 
 
 def _mock_skill_engine(matches: list[SkillSummary] | None = None) -> MagicMock:
@@ -513,3 +547,129 @@ async def test_handle_message_passes_history_to_runtime(
     assert len(calls) == 1
     _, kwargs = calls[0]
     assert kwargs.get("history") is fake_history
+
+
+def test_merge_allowed_tools_unioned() -> None:
+    """Merge should union allowed_tools across active skills."""
+    merged = _merge_skill_contents(
+        [
+            _skill_content_model(skill_id="a/one", allowed_tools=["execute_code"]),
+            _skill_content_model(skill_id="b/two", allowed_tools=["execute_code", "get_data"]),
+        ]
+    )
+
+    assert merged["allowed_tools"] == ["execute_code", "get_data"]
+
+
+def test_merge_scripts_dirs_merged(tmp_path: Path) -> None:
+    """Merge should preserve all non-empty script directories in score order."""
+    skill_a_scripts = tmp_path / "a_scripts"
+    skill_b_scripts = tmp_path / "b_scripts"
+    skill_a_scripts.mkdir()
+    skill_b_scripts.mkdir()
+
+    merged = _merge_skill_contents(
+        [
+            _skill_content_model(skill_id="a/one", scripts_path=str(skill_a_scripts)),
+            _skill_content_model(skill_id="b/two", scripts_path=str(skill_b_scripts)),
+        ]
+    )
+
+    assert merged["scripts_dirs"] == [str(skill_a_scripts), str(skill_b_scripts)]
+
+
+def test_merge_highest_timeout_wins() -> None:
+    """Merge should pick the maximum timeout across skills."""
+    merged = _merge_skill_contents(
+        [
+            _skill_content_model(skill_id="a/one", timeout=60),
+            _skill_content_model(skill_id="b/two", timeout=120),
+        ]
+    )
+
+    assert merged["skill_timeout"] == 120
+
+
+def test_merge_default_timeout_returns_none() -> None:
+    """Merge should keep timeout unset when all active skills use defaults."""
+    merged = _merge_skill_contents(
+        [
+            _skill_content_model(skill_id="a/one", timeout=60),
+            _skill_content_model(skill_id="b/two", timeout=60),
+        ]
+    )
+
+    assert merged["skill_timeout"] is None
+
+
+def test_merge_mcp_binding_conflict_first_wins() -> None:
+    """First-seen binding should win when tools are bound to different servers."""
+    merged = _merge_skill_contents(
+        [
+            _skill_content_model(
+                skill_id="a/one",
+                mcp_tool_bindings=[MCPToolBinding(tool_name="get_data", server_name="server-x")],
+            ),
+            _skill_content_model(
+                skill_id="b/two",
+                mcp_tool_bindings=[MCPToolBinding(tool_name="get_data", server_name="server-y")],
+            ),
+        ]
+    )
+
+    assert merged["mcp_tool_bindings"] == [
+        MCPToolBinding(tool_name="get_data", server_name="server-x")
+    ]
+
+
+def test_merge_mcp_server_name_dedup_first_seen() -> None:
+    """First-seen MCP server declaration should be retained on name collision."""
+    merged = _merge_skill_contents(
+        [
+            _skill_content_model(
+                skill_id="a/one",
+                mcp_servers=[
+                    SkillMCPServer(name="market-data", transport="sse", url="http://a:8080/sse")
+                ],
+            ),
+            _skill_content_model(
+                skill_id="b/two",
+                mcp_servers=[
+                    SkillMCPServer(name="market-data", transport="sse", url="http://b:8080/sse")
+                ],
+            ),
+        ]
+    )
+
+    server = merged["mcp_servers"][0]
+    assert server.name == "market-data"
+    assert server.url == "http://a:8080/sse"
+
+
+def test_merge_empty_active_skills_returns_none() -> None:
+    """Empty active skill list should preserve no-match behavior."""
+    merged = _merge_skill_contents([])
+
+    assert merged["allowed_tools"] is None
+    assert merged["scripts_dirs"] is None
+    assert merged["skill_timeout"] is None
+
+
+def test_merge_script_filename_collision_warning(tmp_path: Path, caplog: Any) -> None:
+    """Duplicate .py filenames across skills should emit a warning."""
+    skill_a_scripts = tmp_path / "a_scripts"
+    skill_b_scripts = tmp_path / "b_scripts"
+    skill_a_scripts.mkdir()
+    skill_b_scripts.mkdir()
+    (skill_a_scripts / "utils.py").write_text("A = 1", encoding="utf-8")
+    (skill_b_scripts / "utils.py").write_text("B = 2", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        _merge_skill_contents(
+            [
+                _skill_content_model(skill_id="a/one", scripts_path=str(skill_a_scripts)),
+                _skill_content_model(skill_id="b/two", scripts_path=str(skill_b_scripts)),
+            ]
+        )
+
+    assert "Script filename 'utils.py' exists in multiple skills" in caplog.text

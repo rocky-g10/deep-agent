@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -86,19 +87,12 @@ class AgentOrchestrator:
                 except Exception as exc:
                     logger.warning("Failed to load matched skill '%s': %s", match.skill_id, exc)
 
-            scripts_dirs: list[str] | None = None
-            skill_timeout: int | None = None
-            skill_mcp: list[SkillMCPServer] = []
-            skill_mcp_bindings: list[MCPToolBinding] = []
-            if active_skills:
-                allowed_tools = sorted({tool for skill in active_skills for tool in skill.allowed_tools})
-                scripts_list = [skill.scripts_path for skill in active_skills if skill.scripts_path]
-                scripts_dirs = scripts_list if scripts_list else None
-                max_timeout = max(skill.quality.timeout for skill in active_skills)
-                skill_timeout = max_timeout if max_timeout > 60 else None
-                for skill in active_skills:
-                    skill_mcp.extend(skill.mcp_servers)
-                    skill_mcp_bindings.extend(skill.mcp_tool_bindings)
+            merged = _merge_skill_contents(active_skills)
+            allowed_tools = merged["allowed_tools"]
+            scripts_dirs = merged["scripts_dirs"]
+            skill_timeout = merged["skill_timeout"]
+            skill_mcp = merged["mcp_servers"]
+            skill_mcp_bindings = merged["mcp_tool_bindings"]
 
             primary_skill = active_skills[0] if active_skills else None
 
@@ -312,3 +306,77 @@ def _apply_mcp_tool_bindings(
         selected.extend(matches)
 
     return selected
+
+
+def _merge_skill_contents(active_skills: list[SkillContent]) -> dict[str, Any]:
+    """Merge multiple skill contents into one execution context."""
+    if not active_skills:
+        return {
+            "allowed_tools": None,
+            "scripts_dirs": None,
+            "skill_timeout": None,
+            "mcp_servers": [],
+            "mcp_tool_bindings": [],
+        }
+
+    allowed_tools = sorted(
+        {
+            tool_name
+            for skill in active_skills
+            for tool_name in skill.allowed_tools
+        }
+    )
+    scripts_dirs = [skill.scripts_path for skill in active_skills if skill.scripts_path]
+    skill_timeout = max(skill.quality.timeout for skill in active_skills)
+    if skill_timeout <= 60:
+        skill_timeout = None
+
+    mcp_servers_by_name: dict[str, SkillMCPServer] = {}
+    for skill in active_skills:
+        for server in skill.mcp_servers:
+            mcp_servers_by_name.setdefault(server.name, server)
+
+    mcp_bindings_by_tool: dict[str, MCPToolBinding] = {}
+    for skill in active_skills:
+        for binding in skill.mcp_tool_bindings:
+            if binding.tool_name in mcp_bindings_by_tool:
+                logger.debug(
+                    "Dropping duplicate MCP tool binding for '%s' from skill '%s'",
+                    binding.tool_name,
+                    skill.skill_id,
+                )
+                continue
+            mcp_bindings_by_tool[binding.tool_name] = binding
+
+    _log_script_filename_collisions(active_skills)
+
+    return {
+        "allowed_tools": allowed_tools,
+        "scripts_dirs": scripts_dirs or None,
+        "skill_timeout": skill_timeout,
+        "mcp_servers": list(mcp_servers_by_name.values()),
+        "mcp_tool_bindings": list(mcp_bindings_by_tool.values()),
+    }
+
+
+def _log_script_filename_collisions(active_skills: list[SkillContent]) -> None:
+    """Log warning when python script filenames collide across active skills."""
+    filename_to_skills: dict[str, list[str]] = {}
+    for skill in active_skills:
+        if not skill.scripts_path:
+            continue
+        scripts_path = Path(skill.scripts_path)
+        if not scripts_path.is_dir():
+            continue
+        for script_file in scripts_path.iterdir():
+            if script_file.is_file() and script_file.suffix == ".py":
+                filename_to_skills.setdefault(script_file.name, []).append(skill.skill_id)
+
+    for filename, skill_ids in filename_to_skills.items():
+        if len(skill_ids) > 1:
+            logger.warning(
+                "Script filename '%s' exists in multiple skills: %s — "
+                "higher-scored skill's version will take precedence on PYTHONPATH",
+                filename,
+                skill_ids,
+            )
