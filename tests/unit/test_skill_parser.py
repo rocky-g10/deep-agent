@@ -74,6 +74,84 @@ Body
     assert skill.quality.validation == "Must include VaR number"
 
 
+def test_quality_timeout_parsed(tmp_path: Path) -> None:
+    """Parser should map quality.timeout from frontmatter."""
+    skill_path = tmp_path / "skills" / "risk" / "quality-timeout" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: quality-timeout
+description: quality timeout parsing
+version: "1.0.0"
+tags: [risk]
+allowed-tools: [execute_code]
+quality:
+  timeout: 90
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert skill.quality.timeout == 90
+
+
+def test_quality_defaults_when_omitted(tmp_path: Path) -> None:
+    """Parser should use default quality values when quality is omitted."""
+    skill_path = tmp_path / "skills" / "risk" / "quality-defaults" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: quality-defaults
+description: quality defaults
+version: "1.0.0"
+tags: [risk]
+allowed-tools: [execute_code]
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert skill.quality.timeout == 60
+
+
+def test_inputs_parsed(tmp_path: Path) -> None:
+    """Parser should populate SkillContent.inputs from frontmatter."""
+    skill_path = tmp_path / "skills" / "risk" / "inputs-parsed" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: inputs-parsed
+description: inputs parsing
+version: "1.0.0"
+tags: [risk]
+allowed-tools: [execute_code]
+inputs:
+  - name: portfolio_id
+    type: string
+    description: Portfolio identifier
+    required: true
+  - name: confidence
+    type: number
+    description: Confidence level
+    required: false
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert len(skill.inputs) == 2
+    assert [item.name for item in skill.inputs] == ["portfolio_id", "confidence"]
+
+
 def test_parse_skill_without_inputs_quality_uses_defaults(tmp_path: Path) -> None:
     """Skills without inputs/quality should get empty list and default quality."""
     skill_path = tmp_path / "skills" / "common" / "basic" / "SKILL.md"
