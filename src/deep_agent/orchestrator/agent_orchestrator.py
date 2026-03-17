@@ -94,8 +94,6 @@ class AgentOrchestrator:
             skill_mcp = merged["mcp_servers"]
             skill_mcp_bindings = merged["mcp_tool_bindings"]
 
-            primary_skill = active_skills[0] if active_skills else None
-
             llm_config = self._llm_router.resolve(context)
             builtin_tools = self._build_builtin_tools(
                 context, scripts_dirs=scripts_dirs, timeout=skill_timeout
@@ -109,7 +107,7 @@ class AgentOrchestrator:
 
             system_prompt = self._build_system_prompt(
                 context=context,
-                skill_content=primary_skill,
+                active_skills=active_skills,
                 all_skills=all_skills,
             )
 
@@ -201,7 +199,7 @@ class AgentOrchestrator:
     def _build_system_prompt(
         self,
         context: TenantContext,
-        skill_content: SkillContent | None,
+        active_skills: list[SkillContent],
         all_skills: list[SkillSummary],
     ) -> str:
         """Construct a full system prompt with skills, resources, and tool instructions."""
@@ -215,10 +213,22 @@ class AgentOrchestrator:
             for skill_summary in all_skills:
                 parts.append(f"- {skill_summary.name}: {skill_summary.description}")
 
-        if skill_content is not None:
+        if len(active_skills) == 1:
+            skill = active_skills[0]
             parts.append("")
-            parts.append(f"## Active Skill: {skill_content.name}")
-            parts.append(skill_content.body)
+            parts.append(f"## Active Skill: {skill.name}")
+            parts.append(skill.body)
+        elif len(active_skills) > 1:
+            parts.append("")
+            parts.append("## Active Skills")
+            parts.append(
+                "You may combine functionality from multiple active skills in a single "
+                "`execute_code` call. Each skill's `scripts/` directory is on PYTHONPATH."
+            )
+            for skill in active_skills:
+                parts.append("")
+                parts.append(f"### Skill: {skill.name}")
+                parts.append(skill.body)
 
         if context.resource_env:
             parts.append("")

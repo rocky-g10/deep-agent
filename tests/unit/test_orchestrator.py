@@ -673,3 +673,83 @@ def test_merge_script_filename_collision_warning(tmp_path: Path, caplog: Any) ->
         )
 
     assert "Script filename 'utils.py' exists in multiple skills" in caplog.text
+
+
+def test_system_prompt_single_skill_singular_heading() -> None:
+    """Single active skill should use singular heading with no composition guidance."""
+    orchestrator = AgentOrchestrator(
+        skill_engine=MagicMock(),
+        llm_router=MagicMock(),
+        runtime=MagicMock(),
+        sandbox=AsyncMock(),
+    )
+    prompt = orchestrator._build_system_prompt(
+        context=TenantContext(tenant_id="equities", user_id="test-user"),
+        active_skills=[_skill_content_model(skill_id="a/one")],
+        all_skills=[],
+    )
+
+    assert "## Active Skill:" in prompt
+    assert "## Active Skills" not in prompt
+    assert "You may combine functionality from multiple active skills" not in prompt
+
+
+def test_system_prompt_multi_skill_plural_heading() -> None:
+    """Multiple active skills should use plural heading and composition guidance."""
+    orchestrator = AgentOrchestrator(
+        skill_engine=MagicMock(),
+        llm_router=MagicMock(),
+        runtime=MagicMock(),
+        sandbox=AsyncMock(),
+    )
+    prompt = orchestrator._build_system_prompt(
+        context=TenantContext(tenant_id="equities", user_id="test-user"),
+        active_skills=[
+            _skill_content_model(skill_id="a/one"),
+            _skill_content_model(skill_id="b/two"),
+        ],
+        all_skills=[],
+    )
+
+    assert "## Active Skills" in prompt
+    assert "You may combine functionality from multiple active skills" in prompt
+    assert "### Skill: one" in prompt
+    assert "### Skill: two" in prompt
+
+
+def test_system_prompt_no_skills_no_section() -> None:
+    """No active skills should produce no active-skill prompt section."""
+    orchestrator = AgentOrchestrator(
+        skill_engine=MagicMock(),
+        llm_router=MagicMock(),
+        runtime=MagicMock(),
+        sandbox=AsyncMock(),
+    )
+    prompt = orchestrator._build_system_prompt(
+        context=TenantContext(tenant_id="equities", user_id="test-user"),
+        active_skills=[],
+        all_skills=[],
+    )
+
+    assert "Active Skill" not in prompt
+    assert "Active Skills" not in prompt
+
+
+def test_system_prompt_multi_skill_contains_both_bodies() -> None:
+    """Prompt should include body content for each active skill in multi-skill mode."""
+    first = _skill_content_model(skill_id="a/one")
+    second = _skill_content_model(skill_id="b/two")
+    orchestrator = AgentOrchestrator(
+        skill_engine=MagicMock(),
+        llm_router=MagicMock(),
+        runtime=MagicMock(),
+        sandbox=AsyncMock(),
+    )
+    prompt = orchestrator._build_system_prompt(
+        context=TenantContext(tenant_id="equities", user_id="test-user"),
+        active_skills=[first, second],
+        all_skills=[],
+    )
+
+    assert first.body in prompt
+    assert second.body in prompt
