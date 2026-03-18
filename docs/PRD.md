@@ -1033,6 +1033,14 @@ The composition instruction tells the LLM:
 
 Single-skill queries produce identical results to the pre-composition behavior: same event count, same prompt format (`## Active Skill:` singular), same tool filtering. The `min_score=0.01` threshold ensures zero-scoring skills are excluded while keeping the activation bar low for legitimate cross-skill queries.
 
+#### Demo & validation
+
+- **`scripts/demo_equities_agent.py`** includes a cross-domain skill matching demo: a single query triggers both equities and risk skills simultaneously, exercising the full multi-skill composition pipeline.
+- A multi-skill banner is displayed when 2+ skills activate, making it easy to visually confirm composition is working.
+- `DEMO_QUESTIONS` includes a dedicated multi-skill cross-domain query for quick smoke-testing.
+- **`scripts/demo_risk_agent.py`** provides a standalone risk-domain demo for single-skill baseline comparison.
+- `test_multi_skill_cross_domain_query` provides automated coverage for the cross-domain matching path.
+
 ---
 
 ## 6. Security & Sandboxing
