@@ -335,7 +335,7 @@ def print_events(events: list[dict]) -> None:
                 print(f"   │ ... ({len(code.strip().split(chr(10)))} lines total)")
 
         elif etype == "tool_result":
-            print(f"\n📊 Result:")
+            print("\n📊 Result:")
             for line in ev.get("output", "").strip().split("\n"):
                 print(f"   {line}")
 

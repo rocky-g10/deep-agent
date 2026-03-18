@@ -8,6 +8,9 @@ This script shows developers how to:
   2. Boot the Deep Agent server in-process
   3. Ask natural-language questions about trades, slippage, fill rates, etc.
   4. Stream back events showing SQL generation → execution → formatted results
+  5. **Multi-skill composition** — a cross-domain query activates both
+     trade-analytics and zscore-monitor skills in a single request,
+     demonstrating multi-skill matching and merged execution
 
 The seed data includes:
   - 5,000+ trade executions across 8 symbols, 4 algos, 3 desks, 5 brokers
@@ -17,17 +20,16 @@ The seed data includes:
 No ClickHouse or API keys required — uses SQLite + mock LLM runtime.
 
 Usage:
-    # Interactive demo (5 questions, pretty-printed)
+    # Interactive demo (6 questions, pretty-printed)
     python scripts/demo_equities_agent.py
 
-    # As pytest (validates full pipeline)
+    # As pytest (validates full pipeline incl. multi-skill)
     pytest scripts/demo_equities_agent.py -v
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 import random
 import sqlite3
@@ -161,7 +163,10 @@ def seed_database() -> None:
                 for fill_i in range(n_fills):
                     if fill_i == n_fills - 1:
                         # Partial fill ~80% of the time
-                        fill_qty = remaining if random.random() < 0.80 else int(remaining * random.uniform(0.3, 0.9))
+                        if random.random() < 0.80:
+                            fill_qty = remaining
+                        else:
+                            fill_qty = int(remaining * random.uniform(0.3, 0.9))
                     else:
                         fill_qty = int(remaining * random.uniform(0.15, 0.45))
                     fill_qty = max(fill_qty, 100)
@@ -397,6 +402,66 @@ Q_BROKER_SCORECARD = textwrap.dedent("""\
         print(f"{broker:<8} {fills:>8,} {syms:>6} ${notional:>13,} {slip:>+11.2f} {avg_fill:>10,.0f} {dark:>7.1f}%")
 """)
 
+Q_MULTI_SKILL_VWAP_ZSCORE = textwrap.dedent("""\
+    import sqlite3, os, math
+    conn = sqlite3.connect(os.environ.get("DB_PATH", "/tmp/equities_trades.db"))
+    cur = conn.cursor()
+
+    # ── Part 1: VWAP slippage by algorithm (trade-analytics) ─────────
+    slip_sql = '''
+    SELECT
+        t.algo,
+        count(*) AS fills,
+        round(
+            avg(
+                CASE WHEN t.side = 'buy' THEN 1 ELSE -1 END
+                * (t.price - md.vwap) / md.vwap * 10000
+            ), 2
+        ) AS avg_slippage_bps
+    FROM trades t
+    JOIN market_data_daily md ON md.symbol = t.symbol AND md.date = t.trade_date
+    GROUP BY t.algo
+    ORDER BY avg_slippage_bps ASC
+    '''
+    print("SQL (slippage): " + ' '.join(slip_sql.split()))
+    print()
+    slip_rows = cur.execute(slip_sql).fetchall()
+
+    print(f"{'Algo':<8} {'Fills':>8} {'Slip (bps)':>11}")
+    print("-" * 30)
+    for algo, fills, slip in slip_rows:
+        print(f"{algo:<8} {fills:>8,} {slip:>+11.2f}")
+
+    # ── Part 2: z-score outliers on volume (zscore-monitor) ──────────
+    vol_sql = '''
+    SELECT symbol, date, volume FROM market_data_daily ORDER BY symbol, date
+    '''
+    vol_rows = cur.execute(vol_sql).fetchall()
+    conn.close()
+
+    from collections import defaultdict
+    by_sym = defaultdict(list)
+    for sym, dt, vol in vol_rows:
+        by_sym[sym].append((dt, vol))
+
+    print()
+    print(f"{'Symbol':<8} {'Last Date':<12} {'Volume':>12} {'Z-Score':>9} {'Flag':>8}")
+    print("-" * 53)
+    for sym in sorted(by_sym):
+        entries = by_sym[sym]
+        volumes = [v for _, v in entries]
+        if len(volumes) < 2:
+            continue
+        mean = sum(volumes) / len(volumes)
+        std = math.sqrt(sum((v - mean) ** 2 for v in volumes) / (len(volumes) - 1))
+        if std == 0:
+            std = 1e-9
+        last_date, last_vol = entries[-1]
+        z = (last_vol - mean) / std
+        flag = "OUTLIER" if abs(z) > 2.0 else ""
+        print(f"{sym:<8} {last_date:<12} {last_vol:>12,} {z:>+9.2f} {flag:>8}")
+""")
+
 # Question → (code, summary)
 SCRIPTED: dict[str, tuple[str, str]] = {
     "top_symbols": (
@@ -405,19 +470,28 @@ SCRIPTED: dict[str, tuple[str, str]] = {
     ),
     "slippage": (
         Q_SLIPPAGE_BY_ALGO,
-        "VWAP slippage breakdown by algorithm. VWAP and IS algos show tighter execution; DMA has wider slippage as expected for direct market access.",
+        "VWAP slippage breakdown by algorithm. VWAP and IS algos show"
+        " tighter execution; DMA has wider slippage as expected.",
     ),
     "trader": (
         Q_TRADER_LEADERBOARD,
-        "Trader leaderboard ranked by average slippage. Lower (more negative for sells / closer to zero for buys) is better.",
+        "Trader leaderboard ranked by average slippage. Lower (more"
+        " negative for sells / closer to zero for buys) is better.",
     ),
     "dark": (
         Q_DARK_POOL_TREND,
-        "Daily dark pool utilization over the past 20 trading days. The bar chart shows the percentage of volume routed to dark venues.",
+        "Daily dark pool utilization over the past 20 trading days."
+        " Bar chart shows percentage of volume routed to dark venues.",
     ),
     "broker": (
         Q_BROKER_SCORECARD,
-        "Broker scorecard comparing execution quality, fill sizes, and dark pool routing across all 5 brokers.",
+        "Broker scorecard comparing execution quality, fill sizes,"
+        " and dark pool routing across all 5 brokers.",
+    ),
+    "multi_skill": (
+        Q_MULTI_SKILL_VWAP_ZSCORE,
+        "VWAP slippage by algorithm combined with z-score volume"
+        " outlier flags — two skills activated in one query.",
     ),
 }
 
@@ -426,13 +500,18 @@ def match_question(msg: str) -> str:
     """Keyword-match a user question to a scripted query."""
     m = msg.lower()
     # Order matters — more specific matches first
+    # Multi-skill: needs terms from BOTH trade-analytics AND zscore-monitor
+    has_trade = any(w in m for w in ("slippage", "algo", "vwap", "algorithm", "trades"))
+    has_zscore = any(w in m for w in ("z-score", "zscore", "z score", "outlier", "volume outlier"))
+    if has_trade and has_zscore:
+        return "multi_skill"
     if any(w in m for w in ("broker", "scorecard", "counterparty")):
         return "broker"
     if any(w in m for w in ("dark", "pool", "venue", "lit")):
         return "dark"
     if any(w in m for w in ("trader", "leaderboard", "who", "person", "best")):
         return "trader"
-    if any(w in m for w in ("slippage", "algo", "vwap", "algorithm")):
+    if has_trade:
         return "slippage"
     if any(w in m for w in ("top", "symbol", "notional", "biggest")):
         return "top_symbols"
@@ -451,7 +530,10 @@ class DemoRuntime:
 
     async def stream(self, agent: dict, message: str, context: Any, history: Any = None):
         from deep_agent.models.events import (
-            AgentChunkEvent, AgentCompleteEvent, ToolCallEvent, ToolResultEvent,
+            AgentChunkEvent,
+            AgentCompleteEvent,
+            ToolCallEvent,
+            ToolResultEvent,
         )
 
         key = match_question(message)
@@ -469,7 +551,8 @@ class DemoRuntime:
         parsed = json.loads(raw)
         output = parsed.get("stdout") or parsed.get("stderr") or "(no output)"
 
-        yield ToolResultEvent(tool="execute_code", output=output, files=parsed.get("output_files", {}))
+        files = parsed.get("output_files", {})
+        yield ToolResultEvent(tool="execute_code", output=output, files=files)
         yield AgentChunkEvent(content=summary)
         yield AgentCompleteEvent(summary=summary, tokens_used=0)
 
@@ -493,7 +576,10 @@ def build_app():
 
     tenant = build_tenant_context("equities", config_root=config_root)
     bindings = load_agent_bindings("equities-desk-agent", config_root=config_root)
-    assert bindings, "Could not load equities-desk-agent — check config/agents/equities-desk-agent.yaml"
+    assert bindings, (
+        "Could not load equities-desk-agent"
+        " — check config/agents/equities-desk-agent.yaml"
+    )
 
     return app, tenant, bindings
 
@@ -551,6 +637,10 @@ async def ask_agent(question: str) -> list[dict]:
 
 def print_events(events: list[dict]) -> None:
     """Pretty-print event stream."""
+    skill_matches = [e for e in events if e.get("type") == "skill_match"]
+    if len(skill_matches) >= 2:
+        ids = " + ".join(e.get("skill_id", "?") for e in skill_matches)
+        print(f"\n🎯 Multi-skill activated: {ids}")
     for ev in events:
         etype = ev.get("type", "unknown")
         if etype == "skill_match":
@@ -560,19 +650,20 @@ def print_events(events: list[dict]) -> None:
             code = ev.get("input", {}).get("code", "")
             # Show just the SQL portion
             lines = code.strip().split("\n")
-            sql_lines = [l for l in lines if l.strip() and not l.strip().startswith(("import", "conn", "cur", "rows", "print", "#", "for ", "bar "))]
+            skip = ("import", "conn", "cur", "rows", "print", "#", "for ", "bar ")
+            sql_lines = [ln for ln in lines if ln.strip() and not ln.strip().startswith(skip)]
             for line in sql_lines[:12]:
                 print(f"   │ {line}")
             if len(sql_lines) > 12:
                 print(f"   │ ... ({len(lines)} lines total)")
         elif etype == "tool_result":
-            print(f"\n📊 Result:")
+            print("\n📊 Result:")
             for line in ev.get("output", "").strip().split("\n"):
                 print(f"   {line}")
         elif etype == "agent_chunk":
             print(f"\n💬 {ev.get('content', '')}")
         elif etype == "agent_complete":
-            print(f"\n✅ Complete")
+            print("\n✅ Complete")
         elif etype == "error":
             print(f"\n❌ Error [{ev.get('code')}]: {ev.get('message')}")
 
@@ -587,6 +678,7 @@ DEMO_QUESTIONS = [
     ("👤 Trader Leaderboard", "Who are the best traders by execution quality?"),
     ("🌑 Dark Pool Trend", "Show me daily dark pool usage over the past 20 days"),
     ("🏦 Broker Scorecard", "Give me a broker scorecard — slippage, fill sizes, dark pool routing"),
+    ("🔀 Multi-Skill", "Show trades slippage by algorithm and flag volume outlier symbols"),
 ]
 
 
@@ -711,7 +803,7 @@ async def test_broker_scorecard():
 @pytest.mark.timeout(30)
 async def test_event_pipeline_order():
     """Events follow correct order: skill_match → tool_call → tool_result → complete."""
-    events = await ask_agent("top symbols")
+    events = await ask_agent("Show trades slippage by algo")
     types = [e["type"] for e in events]
     sm = types.index("skill_match")
     tc = types.index("tool_call")
@@ -728,6 +820,20 @@ async def test_sql_shown_in_output():
     result = next(e for e in events if e["type"] == "tool_result")
     output = result["output"]
     assert "SELECT" in output and "FROM trades" in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_multi_skill_cross_domain_query():
+    """Cross-domain query activates 2 skills: trade-analytics + zscore-monitor."""
+    events = await ask_agent(
+        "Show trades slippage by algorithm and flag volume outlier symbols"
+    )
+    skill_matches = [e for e in events if e["type"] == "skill_match"]
+    matched_ids = {e["skill_id"] for e in skill_matches}
+    assert len(skill_matches) >= 2
+    assert "equities/trade-analytics" in matched_ids
+    assert "equities/zscore-monitor" in matched_ids
 
 
 # ---------------------------------------------------------------------------
