@@ -530,7 +530,34 @@ print(f'VaR: \${result[\"var\"]:,.0f}')
 
 ---
 
-## 9. Testing the Agent in Isolation
+## 9. Multi-Skill Composition
+
+The orchestrator activates **multiple skills** for a single user message when a query spans domains. For example, "Compute VaR for EQ-MACRO-1 and flag z-score outliers in the positions" activates both the `portfolio-var` and `zscore-monitor` skills. The LLM then generates a single Python script importing from both skills' `scripts/` directories:
+
+```python
+from risk_calc import calculate_var   # from portfolio-var skill
+from firm_stats import zscore          # from zscore-monitor skill
+```
+
+### How it works
+
+1. `SkillEngine.match()` accepts a `min_score` parameter as the sole relevance filter. All bound skills scoring at or above `min_score` are activated — there is no artificial cap.
+2. The orchestrator merges their `scripts/` directories onto `PYTHONPATH`, unions their `allowed-tools`, and concatenates their instructions into the system prompt.
+3. One `SkillMatchEvent` is emitted per activated skill (same schema, multiple emissions).
+4. Higher-scored skill wins on MCP binding or script filename conflicts.
+
+For single-skill queries, behavior is identical to before: one `SkillMatchEvent`, singular `## Active Skill:` heading. The multi-skill prompt format (`## Active Skills` with `### Skill:` subsections) only appears when two or more skills activate.
+
+### Authoring skills for composition
+
+- **Keep script names unique across skills.** Use descriptive names like `risk_calc.py` instead of generic `utils.py`. The higher-scored skill's version shadows duplicates on `PYTHONPATH`.
+- **Use descriptive tags** so the matcher can detect cross-skill queries. A query containing both "VaR" and "z-score" triggers both skills. The more specific your tags, the better multi-skill matching works.
+- **`scripts/` directories use flat imports.** Skill directories may use kebab-case names (e.g., `portfolio-var/`), but this doesn't affect Python imports — the framework puts each skill's `scripts/` directory directly on `PYTHONPATH`, so `from risk_calc import calculate_var` works without any package prefix.
+- **Skills must remain independently functional.** Composition is additive — your skill must work on its own, not only in combination with another.
+
+---
+
+## 10. Testing the Agent in Isolation
 
 Before spinning up the full WebSocket server, use `scripts/invoke_agent.py` to test the entire agent stack — SkillEngine, skill matching, prompt injection, LLM, tool calls, and sandbox execution — with a single command.
 
@@ -619,7 +646,7 @@ The script uses the exact same code paths as the WebSocket API — same orchestr
 
 ---
 
-## 10. Deploying to Production
+## 11. Deploying to Production
 
 ```
 1. Create a PR adding your skill directory to the skills repo

@@ -294,8 +294,9 @@ class SkillEngine:
         """Return name + description for all skills, optionally filtered by agent skill bindings.
         Results are injected into the system prompt so the LLM knows what's available."""
 
-    def match(self, query: str, skill_bindings: list[str] | None = None, top_k: int = 5) -> list[SkillMetadata]:
+    def match(self, query: str, skill_bindings: list[str] | None = None, min_score: float = 0.0) -> list[SkillMetadata]:
         """Rank skills by relevance to the user query, scoped to bound skills.
+        All bound skills scoring at or above min_score are returned — there is no artificial cap.
         MVP: tag + keyword matching. Future: embedding-based similarity."""
 
     def load(self, skill_id: str) -> SkillContent:
@@ -990,6 +991,47 @@ fig.savefig("/output/chart.png", dpi=150, bbox_inches="tight")
 - Chart must have: title, axis labels, legend, grid, date formatting.
 - The summary must include the plain-language interpretation — do not just dump numbers.
 - If the requested metric column does not exist in the schema, list available columns and ask the user to choose.
+
+### 5.5 Multi-Skill Composition
+
+A single user query may span multiple domains — for example, computing VaR for a portfolio (risk skill) while simultaneously flagging z-score outliers in the positions (monitoring skill). Multi-skill composition allows the orchestrator to activate **multiple skills** for a single message so the LLM can generate a unified response that draws on all of them.
+
+#### Matching: `min_score` threshold
+
+`SkillEngine.match()` accepts a `min_score` parameter as the sole relevance filter. The orchestrator calls `match(message, bindings, min_score=0.01)`. All bound skills scoring at or above `min_score` are activated — there is no artificial cap on the number of active skills. The candidate set is already scoped by the agent's `bound_skill_ids` (typically 3–8 skills). One `SkillMatchEvent` is emitted per activated skill, in descending score order. The event schema (`skill_id`, `confidence`) is unchanged — only the cardinality changes.
+
+#### Merge strategies
+
+| Field | Strategy | Detail |
+|-------|----------|--------|
+| `allowed-tools` | **Union** (sorted) | All activated skills' tools are combined. `None` if no skills match (preserves no-filtering behavior). |
+| `scripts/` dirs | **Collect** non-empty paths | Ordered by score (highest first). All directories are joined onto `PYTHONPATH`, so sandbox code can `import` modules from any activated skill. |
+| `quality.timeout` | **max()** across skills | Highest timeout wins. Falls back to the default (60s) if no skill exceeds it. |
+| `mcp-servers` | **Concatenate**, deduplicate by name | First-seen (highest-scored) server definition wins on name collision. |
+| `mcp-tool-bindings` | **Concatenate**, deduplicate by tool name | Higher-scored skill's binding wins on conflict; the lower-scored duplicate is silently dropped with a debug log. |
+
+#### System prompt format
+
+- **0 skills matched:** No active skills section (unchanged).
+- **1 skill matched:** `## Active Skill: {name}` + body (unchanged — full backward compatibility).
+- **2+ skills matched:** `## Active Skills` header, a composition instruction, then `### Skill: {name}` + body for each activated skill.
+
+The composition instruction tells the LLM:
+
+> You may combine functionality from multiple active skills in a single `execute_code` call. Each skill's `scripts/` directory is on PYTHONPATH.
+
+#### Conflict resolution
+
+| Scenario | Resolution |
+|----------|------------|
+| Two skills share a script filename (e.g., `utils.py`) | Warning logged. Python uses the first `PYTHONPATH` entry, so the higher-scored skill's version wins. |
+| Skill A allows `[execute_code]`, Skill B allows `[execute_code, get_data]` | Union: both tools available. |
+| MCP tool binding conflict (same tool name, different servers) | Higher-scored skill's binding wins. |
+| Skill load fails for one of two matches | Failed skill is skipped (warning logged); the other proceeds as sole active skill. |
+
+#### Backward compatibility
+
+Single-skill queries produce identical results to the pre-composition behavior: same event count, same prompt format (`## Active Skill:` singular), same tool filtering. The `min_score=0.01` threshold ensures zero-scoring skills are excluded while keeping the activation bar low for legitimate cross-skill queries.
 
 ---
 
