@@ -122,7 +122,7 @@ def test_match_zscore_query_ranks_zscore_first(
     """Tag-overlap scoring should prioritize zscore skill for zscore query."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("z-scores for AAPL volume", skill_bindings, top_k=2)
+    matched = engine.match("z-scores for AAPL volume", skill_bindings)
 
     assert matched[0].skill_id == "equities/zscore-monitor"
 
@@ -133,7 +133,7 @@ def test_match_query_database_ranks_db_query_first(
     """Tag-overlap scoring should prioritize db-query for database query text."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("query database", skill_bindings, top_k=2)
+    matched = engine.match("query database", skill_bindings)
 
     assert matched[0].skill_id == "common/db-query"
 
@@ -144,7 +144,7 @@ def test_min_score_filters_low_scoring(
     """min_score should drop low-scoring matches from the result set."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("equities zscore volume", skill_bindings, top_k=3, min_score=0.4)
+    matched = engine.match("equities zscore volume", skill_bindings, min_score=0.4)
 
     assert len(matched) == 1
     assert matched[0].skill_id == "equities/zscore-monitor"
@@ -154,12 +154,12 @@ def test_min_score_filters_low_scoring(
 def test_min_score_zero_returns_all(
     temp_skills_root: Path, skill_bindings: AgentSkillBindings
 ) -> None:
-    """min_score=0 should preserve current behavior and return top_k results."""
+    """min_score=0 should return all bound skills (no filtering)."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("query database", skill_bindings, top_k=2, min_score=0.0)
+    matched = engine.match("query database", skill_bindings, min_score=0.0)
 
-    assert len(matched) == 2
+    assert len(matched) >= 2
     assert matched[0].skill_id == "common/db-query"
 
 
@@ -169,9 +169,39 @@ def test_min_score_filters_all_when_none_match(
     """When no match clears the threshold, an empty list should be returned."""
     engine = SkillEngine(skills_root=temp_skills_root)
 
-    matched = engine.match("totally unrelated tokens", skill_bindings, top_k=2, min_score=0.01)
+    matched = engine.match("totally unrelated tokens", skill_bindings, min_score=0.01)
 
     assert matched == []
+
+
+def test_no_top_k_cap_all_matching_skills_returned(tmp_path: Path) -> None:
+    """All bound skills above min_score must be returned — no artificial cap."""
+    root = tmp_path / "skills"
+    skill_ids = []
+    # Create 7 skills, all sharing the tag "analytics"
+    for i in range(7):
+        tenant = f"desk{i}"
+        skill_name = f"skill-{i}"
+        _write_skill(
+            root=root,
+            tenant_dir=tenant,
+            skill_dir=skill_name,
+            name=skill_name,
+            description=f"Analytics skill {i}",
+            tags=["analytics", f"tag{i}"],
+        )
+        skill_ids.append(f"{tenant}/{skill_name}")
+
+    bindings = AgentSkillBindings(agent_id="test-agent", bound_skill_ids=tuple(skill_ids))
+    engine = SkillEngine(skills_root=root)
+
+    matched = engine.match("analytics", bindings, min_score=0.01)
+
+    # All 7 skills have the "analytics" tag and should score above 0.01
+    assert len(matched) == 7, (
+        f"Expected all 7 skills above min_score, got {len(matched)}: "
+        f"{[m.skill_id for m in matched]}"
+    )
 
 
 def test_load_returns_full_skill_content(

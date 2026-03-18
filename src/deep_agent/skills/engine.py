@@ -65,17 +65,22 @@ class SkillEngine:
         self,
         query: str,
         bindings: AgentSkillBindings,
-        top_k: int = 5,
         min_score: float = 0.0,
     ) -> list[SkillSummary]:
-        """Return top matching skills ranked by tag overlap with query tokens."""
+        """Return matching skills ranked by tag overlap with query tokens.
+
+        All bound skills scoring at or above ``min_score`` are returned —
+        there is no artificial cap.  The candidate set is already scoped by
+        the agent's ``bound_skill_ids``, and ``min_score`` is the sole
+        relevance filter.
+        """
         bound = self._bound_skills(bindings)
         query_tokens = _tokenize(query)
         scored: list[tuple[float, SkillContent]] = [
             (_score_skill(skill=skill, query_tokens=query_tokens), skill) for skill in bound
         ]
         scored.sort(key=lambda item: (-item[0], item[1].skill_id))
-        top = scored[:top_k] if top_k > 0 else []
+        top = scored
         if min_score > 0.0:
             top = [(score, skill) for score, skill in top if score >= min_score]
 
@@ -89,7 +94,7 @@ class SkillEngine:
             )
             for score, skill in top
         ]
-        logger.debug("Matched %d skills for query (top_k=%d)", len(result), top_k)
+        logger.debug("Matched %d skills for query (min_score=%.2f)", len(result), min_score)
         return result
 
     def load(self, skill_id: str, bindings: AgentSkillBindings) -> SkillContent:

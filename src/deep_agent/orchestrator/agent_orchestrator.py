@@ -28,7 +28,6 @@ from deep_agent.tools.execute_code import create_execute_code_tool
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MULTI_SKILL_TOP_K = 3
 _DEFAULT_MULTI_SKILL_MIN_SCORE = 0.01
 
 
@@ -72,7 +71,6 @@ class AgentOrchestrator:
             matched_skills = self._skill_engine.match(
                 message,
                 skill_bindings,
-                top_k=_DEFAULT_MULTI_SKILL_TOP_K,
                 min_score=_DEFAULT_MULTI_SKILL_MIN_SCORE,
             )
 
@@ -337,9 +335,8 @@ def _merge_skill_contents(active_skills: list[SkillContent]) -> dict[str, Any]:
         }
     )
     scripts_dirs = [skill.scripts_path for skill in active_skills if skill.scripts_path]
-    skill_timeout = max(skill.quality.timeout for skill in active_skills)
-    if skill_timeout <= 60:
-        skill_timeout = None
+    max_timeout = max(skill.quality.timeout for skill in active_skills)
+    skill_timeout: int | None = max_timeout if max_timeout > 60 else None
 
     mcp_servers_by_name: dict[str, SkillMCPServer] = {}
     for skill in active_skills:

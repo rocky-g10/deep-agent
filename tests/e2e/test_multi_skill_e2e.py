@@ -179,7 +179,8 @@ async def test_multi_skill_full_pipeline(multi_skill_components: tuple[Any, Any,
     errors = [e for e in events if e["type"] == "error"]
 
     assert len(skill_matches) == 2
-    assert {e["skill_id"] for e in skill_matches} == {"risk/portfolio-var", "equities/zscore-monitor"}
+    matched_ids = {e["skill_id"] for e in skill_matches}
+    assert matched_ids == {"risk/portfolio-var", "equities/zscore-monitor"}
     assert len(tool_calls) == 1
     assert tool_calls[0]["tool"] == "execute_code"
     assert len(tool_results) == 1
