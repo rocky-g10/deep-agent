@@ -646,7 +646,183 @@ The script uses the exact same code paths as the WebSocket API — same orchestr
 
 ---
 
-## 11. Deploying to Production
+## 11. Human-in-the-Loop (HITL)
+
+> **Planned Feature — Not Yet Implemented**
+> The HITL framework described in this section is a design specification. No runtime implementation exists in `src/` as of v0.2.0-draft. The demo in `scripts/demo_risk_agent.py` simulates the intended behavior for illustration purposes.
+
+The framework will support three interaction patterns that let the agent pause, collect human input, and resume. Skill authors will write **zero HITL code** — the LLM will decide when to ask based on your skill's prompt guidance, and the engine will handle suspension and resumption automatically.
+
+### 11.1 The Three Patterns
+
+| Pattern | When the agent uses it | User sees |
+|---------|----------------------|-----------|
+| **Clarify** | Query is ambiguous or missing context | A chat-style question, optionally with choices |
+| **Approve** | Action is high-risk or irreversible | A modal dialog with approve/deny buttons |
+| **Collect** | Multiple structured fields are needed | A form with typed, validated fields |
+
+### 11.2 Enabling HITL in Your Skill
+
+HITL will be driven entirely by frontmatter configuration and prompt wording. No Python code will be needed.
+
+**Clarification** — just write clear instructions. The LLM will naturally ask when information is missing once HITL is implemented:
+
+```yaml
+---
+name: "Portfolio VaR Report"
+description: "Compute VaR for a portfolio using historical simulation."
+clarification-hints:
+  - missing_portfolio: "Which portfolio should I analyze?"
+  - ambiguous_period: "What time range — YTD or trailing 12 months?"
+---
+
+# Portfolio VaR Report
+
+## Instructions
+
+1. If the user doesn't specify a portfolio, ask which one they want.
+2. If the time period is ambiguous, clarify before computing.
+3. Compute VaR using historical simulation.
+```
+
+**Approval gates** — add `requires-approval: true` and mention approval in your instructions:
+
+```yaml
+---
+name: "Hedging Executor"
+description: "Execute hedging trades to reduce portfolio risk."
+requires-approval: true
+---
+
+# Hedging Executor
+
+## Instructions
+
+1. Analyze the portfolio's risk exposure.
+2. Propose a hedging strategy with specific trades.
+3. **Before executing any trade**, present the full trade details
+   (symbol, quantity, side, estimated notional) and request explicit approval.
+```
+
+**Structured input** — describe the fields in your prompt. The LLM will present them as a form-like interaction:
+
+```yaml
+---
+name: "Trade Booking"
+description: "Book a trade order via the OMS."
+requires-approval: true
+---
+
+# Trade Booking
+
+## Instructions
+
+1. Collect the following from the user: ticker, quantity, side (buy/sell),
+   limit price (optional), and time-in-force (DAY, GTC, or IOC).
+2. Validate the inputs against the instrument reference data.
+3. Present a summary and request approval before submitting.
+```
+
+### 11.3 How the LLM Decides When to Ask
+
+The LLM will call the built-in `human_interaction` tool, which the engine will intercept. You will not need to call it explicitly — the orchestrator will inject it into the tool set automatically. The LLM will decide when to invoke it based on:
+
+1. **Missing information** — the skill instructions say "if the user doesn't specify X, ask" → LLM will call `human_interaction(kind="clarify", question="Which X?")`.
+2. **`requires-approval: true`** — the orchestrator will add a system directive requiring approval before irreversible actions → LLM will call `human_interaction(kind="approve", ...)`.
+3. **Multiple fields needed** — the skill instructions describe a set of required inputs → LLM will call `human_interaction(kind="collect", fields=[...])`.
+
+### 11.4 WebSocket Events
+
+When the agent suspends, clients will receive an `interaction_required` event:
+
+```json
+{
+  "type": "interaction_required",
+  "run_id": "run-abc123",
+  "skill_id": "risk/portfolio-var",
+  "interaction": {
+    "kind": "clarify",
+    "question": "Which portfolio should I analyze?",
+    "options": ["EQ-MACRO-1", "FI-GOV-2", "MULTI-STRAT-3"],
+    "timeout_seconds": 300
+  }
+}
+```
+
+The client will render the appropriate UI and submit the response via the REST API:
+
+```
+POST /api/v1/runs/run-abc123/respond
+
+{"response": {"kind": "clarify", "value": "EQ-MACRO-1"}}
+```
+
+The agent will then resume with the user's answer and continue execution.
+
+### 11.5 Timeout and Fallback
+
+Every interaction will have a timeout (default: 300 seconds). When a timeout fires, the `fallback` strategy will determine what happens:
+
+| Fallback | Behavior |
+|----------|----------|
+| `abort` (default) | Run will be terminated; user sees a timeout error |
+| `default` | Engine will inject default values and resume (only for `collect` with defaults) |
+| `skip` | Engine will skip the interaction; LLM continues without the answer |
+
+Configure timeouts in the skill frontmatter:
+
+```yaml
+quality:
+  hitl-timeout: 600          # 10 minutes (for approval gates routed to managers)
+  hitl-fallback: abort       # abort | default | skip
+```
+
+### 11.6 Testing HITL Flows Locally
+
+Once implemented, use `scripts/invoke_agent.py` with `--interactive` to test HITL flows. When the agent suspends, the script will prompt you in the terminal:
+
+```bash
+python scripts/invoke_agent.py --interactive \
+  "What's the VaR for the portfolio?"
+
+# Output:
+# [skill_match] risk/portfolio-var (score: 0.52)
+# [interaction_required] clarify: "Which portfolio should I analyze?"
+#   Options: EQ-MACRO-1, FI-GOV-2, MULTI-STRAT-3
+# > Your answer: EQ-MACRO-1          ← you type this
+# [tool_call] execute_code(...)
+# [tool_result] Portfolio: EQ-MACRO-1 ...
+# [done] tokens used: 1,247
+```
+
+For approval gates:
+
+```bash
+python scripts/invoke_agent.py --interactive \
+  "VaR is too high, hedge the NVDA exposure"
+
+# [interaction_required] approve: "Execute hedge: SELL 200 NVDA @ market (~$184,160)"
+#   Risk level: high
+# > Approve? (y/n): y
+# [tool_call] execute_code(...)
+# [agent_complete] Hedge executed successfully.
+```
+
+### 11.7 HITL in the Risk Demo
+
+The risk demo (`scripts/demo_risk_agent.py`) simulates a concrete HITL scenario:
+
+1. The agent computes VaR and detects it exceeds the 2% risk threshold.
+2. It proposes a hedging trade and triggers an **approval gate**.
+3. The demo simulates user approval and the agent resumes execution.
+4. Before executing, the agent asks a **clarification**: "Apply hedge to the full position or only the excess?"
+5. The demo simulates the user choosing "excess only" and the agent completes.
+
+This demonstrates the full suspend → interact → resume lifecycle in a realistic risk management workflow.
+
+---
+
+## 12. Deploying to Production
 
 ```
 1. Create a PR adding your skill directory to the skills repo

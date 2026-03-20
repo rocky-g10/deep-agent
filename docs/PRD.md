@@ -1,7 +1,7 @@
 # Deep Agent — Product Requirements Document
 
-> **Version:** 0.1.0-draft
-> **Last Updated:** 2026-03-09
+> **Version:** 0.2.0-draft
+> **Last Updated:** 2026-03-19
 > **Status:** Draft
 > **Author:** Rio (stakeholder), Engineering
 
@@ -1182,6 +1182,7 @@ Every action in the system is logged as a structured JSON event. This is non-neg
 | `skill_match` | Every skill match: skill ID, confidence score, matched tags |
 | `auth` | Login, logout, token refresh, permission denied events |
 | `input_sanitization` | Flagged inputs: pattern matched, risk score, action taken |
+| `hitl_interaction` | Human-in-the-loop: interaction kind, question/action, response, responder, latency, outcome |
 | `error` | All errors: category, message, stack trace hash |
 
 #### Storage & Retention
@@ -1538,14 +1539,327 @@ Allow `desk_admin` to configure cron-scheduled agent executions:
 - Example: "Every weekday at 7:00 AM, run the z-score monitor for our top 20 holdings and email the report to the desk."
 - Reuses the same skills, sandbox, and audit pipeline — no separate execution path.
 
-### 11.4 Human-in-the-Loop for High-Risk Operations
+### 11.4 Human-in-the-Loop Framework
 
-For sensitive workflows (trade booking, large data exports, compliance-flagged queries):
+> **Planned Feature — Not Yet Implemented**
+> The HITL framework described in this section is a design specification. No runtime implementation exists in `src/` as of v0.2.0-draft. The demo in `scripts/demo_risk_agent.py` simulates the intended behavior for illustration purposes.
 
-- Agent pauses and emits an `approval_required` WebSocket event.
-- The UI presents the proposed action to the user (or a designated approver).
-- Execution proceeds only after explicit approval; denial is audit-logged.
-- Configurable per-skill via a `requires-approval: true` frontmatter field.
+The agent will support three distinct interaction patterns that will allow it to pause, collect human input, and resume execution. These patterns will be implemented via a single built-in tool (`HumanInteraction`) that the LLM will invoke when it determines human input will be needed.
+
+#### 11.4.1 Interaction Patterns
+
+**Pattern 1: Clarification Request** — The most common pattern. The agent will lack sufficient information to proceed and will ask the user a question.
+
+| Attribute | Detail |
+|-----------|--------|
+| **Trigger** | LLM will determine the query is ambiguous or missing required context |
+| **Examples** | "Which portfolio — EQ-MACRO-1 or FI-GOV-2?", "YTD or trailing 12 months?" |
+| **User experience** | Chat-style question, optional multiple-choice |
+| **Skill author work** | Zero — the LLM will decide when to clarify based on skill prompt guidance |
+
+**Pattern 2: Approval Gate** — The agent will propose a high-risk or irreversible action and will wait for explicit human approval before executing.
+
+| Attribute | Detail |
+|-----------|--------|
+| **Trigger** | Skill frontmatter `requires-approval: true`, or LLM will judge the action as risky |
+| **Examples** | "Execute hedge order: SELL 200 NVDA @ market?", "Export 50k rows to S3?" |
+| **User experience** | Modal dialog with action summary, risk level badge, approve/deny buttons |
+| **Skill author work** | Add `requires-approval: true` to frontmatter; optionally hint risk levels in the prompt |
+
+**Pattern 3: Structured Input Collection** — The agent will need multiple structured fields to proceed, presented as a form-like interaction.
+
+| Attribute | Detail |
+|-----------|--------|
+| **Trigger** | LLM will determine multiple fields will be needed simultaneously |
+| **Examples** | Trade booking (ticker, qty, side, limit price, TIF), report parameters |
+| **User experience** | Form with typed fields, validation, submit button |
+| **Skill author work** | Zero — the LLM will infer required fields from skill instructions |
+
+#### 11.4.2 `HumanInteraction` Built-in Tool
+
+The LLM will invoke this tool like any other. The engine will intercept the call, suspend the agent run, and emit a WebSocket event to the connected client.
+
+```python
+@dataclass
+class HumanInteraction:
+    """Built-in tool for requesting human input during agent execution."""
+
+    kind: Literal["clarify", "approve", "collect"]
+
+    # For kind="clarify"
+    question: str | None = None
+    options: list[str] | None = None        # Optional multiple-choice
+
+    # For kind="approve"
+    action_description: str | None = None
+    risk_level: Literal["low", "medium", "high"] | None = None
+
+    # For kind="collect"
+    fields: list[FieldSpec] | None = None   # Typed form fields
+
+    # Timeout + fallback
+    timeout_seconds: int = 300
+    fallback: Literal["abort", "default", "skip"] = "abort"
+
+
+@dataclass
+class FieldSpec:
+    """One field in a structured input collection form."""
+    name: str
+    type: Literal["string", "number", "boolean", "date", "enum"]
+    required: bool = True
+    description: str = ""
+    enum_values: list[str] | None = None    # For type="enum"
+    default: str | None = None
+```
+
+#### 11.4.3 Suspend / Resume Lifecycle
+
+```
+User query
+  │
+  ▼
+LLM will process query with skill context
+  │
+  ├─ (normal path) ──► tool calls ──► response ──► AgentComplete
+  │
+  └─ (will need input) ──► LLM will call HumanInteraction tool
+                            │
+                            ▼
+                   Engine WILL SUSPEND agent run
+                   Will serialize state to checkpoint store
+                            │
+                            ▼
+                   Will emit WebSocket event: interaction_required
+                   { run_id, kind, question/fields/action, skill_id }
+                            │
+                            ▼
+                   Client will render UI (question / form / approval dialog)
+                            │
+                            ▼
+                   User will respond ──► POST /api/v1/runs/{run_id}/respond
+                            │
+                            ▼
+                   Engine WILL RESUME from checkpoint
+                   Will inject user response as tool result
+                            │
+                            ▼
+                   LLM will continue with the human-provided input
+                            │
+                            ▼
+                   AgentComplete
+```
+
+**State machine:**
+
+| State | Transitions To | Trigger |
+|-------|---------------|---------|
+| `running` | `suspended` | LLM will call `HumanInteraction` tool |
+| `suspended` | `running` | User will submit response via API |
+| `suspended` | `timed_out` | `timeout_seconds` will elapse with no response |
+| `timed_out` | `aborted` | `fallback="abort"` (default) |
+| `timed_out` | `running` | `fallback="default"` — engine will inject default values and will resume |
+| `timed_out` | `running` | `fallback="skip"` — engine will skip the interaction and will continue |
+| `running` | `completed` | Agent will emit `AgentComplete` |
+| `running` | `failed` | Unrecoverable error |
+
+#### 11.4.4 WebSocket Event: `interaction_required`
+
+When the agent will suspend for human input, the following event will be pushed to connected clients:
+
+```json
+{
+  "type": "interaction_required",
+  "run_id": "run-abc123",
+  "skill_id": "risk/portfolio-var",
+  "interaction": {
+    "kind": "clarify",
+    "question": "Which portfolio should I analyze?",
+    "options": ["EQ-MACRO-1", "FI-GOV-2", "MULTI-STRAT-3"],
+    "timeout_seconds": 300,
+    "fallback": "abort"
+  }
+}
+```
+
+For approval gates:
+
+```json
+{
+  "type": "interaction_required",
+  "run_id": "run-def456",
+  "skill_id": "risk/portfolio-var",
+  "interaction": {
+    "kind": "approve",
+    "action_description": "Execute hedge: SELL 200 NVDA @ market (~$184,160 notional)",
+    "risk_level": "high",
+    "timeout_seconds": 600,
+    "fallback": "abort"
+  }
+}
+```
+
+For structured input:
+
+```json
+{
+  "type": "interaction_required",
+  "run_id": "run-ghi789",
+  "skill_id": "equities/trade-booking",
+  "interaction": {
+    "kind": "collect",
+    "fields": [
+      {"name": "ticker", "type": "string", "required": true, "description": "Instrument symbol"},
+      {"name": "quantity", "type": "number", "required": true, "description": "Number of shares"},
+      {"name": "side", "type": "enum", "required": true, "enum_values": ["buy", "sell"]},
+      {"name": "limit_price", "type": "number", "required": false, "description": "Limit price (blank for market)"},
+      {"name": "tif", "type": "enum", "required": true, "enum_values": ["DAY", "GTC", "IOC"], "default": "DAY"}
+    ],
+    "timeout_seconds": 600,
+    "fallback": "abort"
+  }
+}
+```
+
+#### 11.4.5 Response API: `POST /api/v1/runs/{run_id}/respond`
+
+The frontend will submit the user's response to resume the suspended agent run.
+
+```
+POST /api/v1/runs/{run_id}/respond
+Content-Type: application/json
+Authorization: Bearer <user-token>
+
+{
+  "response": {
+    "kind": "clarify",
+    "value": "EQ-MACRO-1"
+  }
+}
+```
+
+For approvals:
+
+```json
+{
+  "response": {
+    "kind": "approve",
+    "approved": true
+  }
+}
+```
+
+Or to deny:
+
+```json
+{
+  "response": {
+    "kind": "approve",
+    "approved": false,
+    "reason": "Not authorized for this notional"
+  }
+}
+```
+
+For structured input:
+
+```json
+{
+  "response": {
+    "kind": "collect",
+    "values": {
+      "ticker": "NVDA",
+      "quantity": 200,
+      "side": "sell",
+      "tif": "DAY"
+    }
+  }
+}
+```
+
+**Response codes:**
+
+| Code | Meaning |
+|------|---------|
+| `200 OK` | Response accepted, agent resumed |
+| `404 Not Found` | Unknown `run_id` or run already completed |
+| `409 Conflict` | Run is not in `suspended` state (already responded or timed out) |
+| `422 Unprocessable` | Validation failure (missing required fields, type mismatch) |
+
+#### 11.4.6 Checkpoint Store
+
+Suspended agent state will be serialized to the checkpoint store so the agent will be able to resume after an arbitrary delay (seconds to hours for desk-admin approvals).
+
+| Backend | Use Case | Configuration |
+|---------|----------|---------------|
+| **Redis** | Low-latency, short-lived suspensions (clarifications) | Default; TTL = `timeout_seconds + 60s` buffer |
+| **PostgreSQL** | Long-lived suspensions (approvals routed to managers) | `checkpoint_backend: postgres` in tenant config |
+
+Checkpoint payload will include: LLM conversation history, tool call stack, matched skill context, sandbox state (env vars, PYTHONPATH), and the pending `HumanInteraction` request.
+
+#### 11.4.7 Skill Author Experience
+
+Skill authors will write **zero HITL code**. The LLM will naturally invoke `HumanInteraction` based on prompt guidance in the skill definition:
+
+```yaml
+---
+name: "Portfolio VaR Report"
+description: "Compute Value at Risk with optional hedging recommendations."
+requires-approval: true
+clarification-hints:
+  - missing_portfolio: "Which portfolio should I analyze?"
+  - ambiguous_period: "What time range — YTD or trailing 12 months?"
+---
+
+# Portfolio VaR Report
+
+## Instructions
+
+1. If the user doesn't specify a portfolio, ask them to choose from the available portfolios.
+2. Compute VaR using historical simulation.
+3. If VaR exceeds 2% of notional, recommend a hedge.
+4. **Before executing any hedge**, request explicit approval — show the proposed trade details and notional impact.
+```
+
+The `requires-approval` frontmatter field will instruct the orchestrator to inject an additional system-prompt directive: "You MUST call the `human_interaction` tool with `kind=approve` before executing any trade or irreversible action." The `clarification-hints` will be injected as guidance for the LLM to understand common ambiguity points.
+
+#### 11.4.8 Multi-Skill Composition and HITL
+
+When multiple skills will be active and one will trigger a `HumanInteraction`:
+
+- Only the branch that triggered the interaction will be suspended.
+- Other active skills will continue executing independently.
+- Results will be merged when all branches complete (including the resumed branch).
+- If the suspended skill will time out and will fall back to `abort`, the remaining skills' results will still be returned with a note that one skill was aborted.
+
+#### 11.4.9 Delivery Channels
+
+The `interaction_required` event will be routable to multiple delivery channels beyond the WebSocket connection:
+
+| Channel | Use Case | Configuration |
+|---------|----------|---------------|
+| **WebSocket** | Real-time chat UI (default) | Always active for connected clients |
+| **Webhook / REST** | Async integrations, internal systems | `hitl_webhook_url` in tenant config |
+| **Slack** | Desk-admin approvals with action buttons | `hitl_slack_channel` in tenant config |
+| **Email** | Compliance approvals with response link | `hitl_email_recipients` in tenant config |
+
+Channel selection will be configurable per tenant and per risk level. For example: `low` → WebSocket only, `medium` → WebSocket + Slack, `high` → WebSocket + Slack + Email to compliance.
+
+#### 11.4.10 Audit Trail for HITL Interactions
+
+All HITL interactions will be audit-logged as a dedicated event category. This is critical for regulatory compliance — every human decision in the agent loop must be traceable.
+
+| Field | Description |
+|-------|-------------|
+| `category` | `hitl_interaction` |
+| `action` | `interaction_requested`, `response_submitted`, `interaction_timed_out` |
+| `interaction_kind` | `clarify`, `approve`, `collect` |
+| `question_or_action` | The question asked or action proposed |
+| `response` | The user's answer, approval decision, or collected values |
+| `responder_id` | Authenticated user who submitted the response |
+| `latency_ms` | Time between request and response |
+| `risk_level` | For approval gates: `low`, `medium`, `high` |
+| `outcome` | `approved`, `denied`, `timed_out`, `skipped` |
 
 ### 11.5 Advanced Integrations
 

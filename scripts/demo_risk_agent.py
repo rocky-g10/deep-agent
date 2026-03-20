@@ -7,12 +7,15 @@ This script shows developers how to:
   2. Boot the Deep Agent server (in-process, no external services needed)
   3. Connect via WebSocket and chat with the risk-desk-agent
   4. Stream back events (skill_match → tool_call → tool_result → agent_complete)
+  5. **Human-in-the-Loop (HITL)** — VaR exceeds risk threshold, agent triggers
+     an approval gate for a hedging trade, asks a clarification question about
+     hedge scope, then resumes execution after simulated user responses
 
 No real ClickHouse, no real API keys required — uses a mock LLM runtime that
 executes deterministic tool calls against local SQLite.
 
 Usage:
-    # Run the interactive demo (starts server, sends questions, prints events)
+    # Run the interactive demo (starts server, sends 3 questions, prints events)
     python scripts/demo_risk_agent.py
 
     # Or run as a pytest test (non-interactive, validates full pipeline)
@@ -160,6 +163,24 @@ COMPUTE_VAR = textwrap.dedent("""\
     print(f"Simulations:        {len(pnl_dist)} historical days")
 """)
 
+HEDGE_EXECUTION = textwrap.dedent("""\
+    import os
+    # Simulated hedge execution after HITL approval
+    print("=" * 55)
+    print("  HEDGE EXECUTION RESULT")
+    print("=" * 55)
+    print()
+    print("Portfolio:       EQ-MACRO-1")
+    print("Action:          SELL 75 NVDA @ market")
+    print("Scope:           Excess exposure only")
+    print("Est. Notional:   $69,060.00")
+    print("Status:          EXECUTED (simulated)")
+    print("New VaR Impact:  Estimated -0.8% reduction")
+    print()
+    print("The hedge reduces NVDA exposure from 150 to 75 shares,")
+    print("bringing the portfolio VaR below the 2% threshold.")
+""")
+
 # Map user questions → the code the "LLM" would generate
 SCRIPTED_RESPONSES: dict[str, tuple[str, str]] = {
     "positions": (
@@ -170,7 +191,34 @@ SCRIPTED_RESPONSES: dict[str, tuple[str, str]] = {
         COMPUTE_VAR,
         "Computed 1-day 95% VaR using historical simulation over 252 trading days.",
     ),
+    "hedge": (
+        HEDGE_EXECUTION,
+        "Hedge executed for excess NVDA exposure after approval.",
+    ),
 }
+
+
+# ---------------------------------------------------------------------------
+# HITL event models (demo-local; in production these live in models/events.py)
+# ---------------------------------------------------------------------------
+from pydantic import BaseModel  # noqa: E402
+
+
+class InteractionRequiredEvent(BaseModel):
+    """Emitted when the agent suspends for human input."""
+
+    type: str = "interaction_required"
+    run_id: str
+    skill_id: str
+    interaction: dict[str, Any]
+
+
+class InteractionResponseEvent(BaseModel):
+    """Emitted when the simulated user responds to an interaction."""
+
+    type: str = "interaction_response"
+    run_id: str
+    response: dict[str, Any]
 
 
 class DemoRuntime:
@@ -196,7 +244,9 @@ class DemoRuntime:
         # Pick the scripted response based on keyword matching
         key = "positions"  # default
         msg_lower = message.lower()
-        if any(w in msg_lower for w in ("var", "risk", "value at risk")):
+        if any(w in msg_lower for w in ("hedge", "reduce", "mitigat")):
+            key = "hedge"
+        elif any(w in msg_lower for w in ("var", "risk", "value at risk")):
             key = "var"
 
         code, summary = SCRIPTED_RESPONSES[key]
@@ -208,13 +258,65 @@ class DemoRuntime:
         )
         assert tool, "execute_code tool not found — check skill allowed-tools"
 
+        # --- HITL: approval gate + clarification for hedge scenario ---
+        if key == "hedge":
+            # Step 1: Agent triggers approval gate
+            yield InteractionRequiredEvent(
+                run_id=f"run-{id(agent):x}",
+                skill_id="risk/portfolio-var",
+                interaction={
+                    "kind": "approve",
+                    "action_description": (
+                        "Execute hedge: SELL 75 NVDA @ market"
+                        " (~$69,060 notional) to reduce VaR"
+                    ),
+                    "risk_level": "high",
+                    "timeout_seconds": 600,
+                    "fallback": "abort",
+                },
+            )
+            # Simulate: user approves
+            yield InteractionResponseEvent(
+                run_id=f"run-{id(agent):x}",
+                response={"kind": "approve", "approved": True},
+            )
+
+            # Step 2: Agent asks clarification
+            yield InteractionRequiredEvent(
+                run_id=f"run-{id(agent):x}",
+                skill_id="risk/portfolio-var",
+                interaction={
+                    "kind": "clarify",
+                    "question": (
+                        "Apply hedge to the full NVDA position"
+                        " (150 shares) or only the excess above"
+                        " the VaR threshold (75 shares)?"
+                    ),
+                    "options": [
+                        "Full position (150 shares)",
+                        "Excess only (75 shares)",
+                    ],
+                    "timeout_seconds": 300,
+                    "fallback": "abort",
+                },
+            )
+            # Simulate: user picks "excess only"
+            yield InteractionResponseEvent(
+                run_id=f"run-{id(agent):x}",
+                response={
+                    "kind": "clarify",
+                    "answer": "Excess only (75 shares)",
+                },
+            )
+
         yield ToolCallEvent(tool="execute_code", input={"code": code})
 
         raw_result = await tool.ainvoke({"code": code})
         parsed = json.loads(raw_result)
         output = parsed.get("stdout") or parsed.get("stderr") or "(no output)"
 
-        yield ToolResultEvent(tool="execute_code", output=output, files=parsed.get("output_files", {}))
+        files = parsed.get("output_files", {})
+        yield ToolResultEvent(tool="execute_code", output=output, files=files)
         yield AgentChunkEvent(content=summary)
         yield AgentCompleteEvent(summary=summary, tokens_used=0)
 
@@ -345,6 +447,36 @@ def print_events(events: list[dict]) -> None:
         elif etype == "agent_complete":
             print(f"\n✅ Complete — {ev.get('summary', '')}")
 
+        elif etype == "interaction_required":
+            interaction = ev.get("interaction", {})
+            kind = interaction.get("kind", "?")
+            if kind == "approve":
+                print("\n⏸️  HITL — Approval Required:")
+                print(f"   Action: {interaction.get('action_description', '?')}")
+                print(f"   Risk level: {interaction.get('risk_level', '?')}")
+            elif kind == "clarify":
+                print("\n⏸️  HITL — Clarification Required:")
+                print(f"   Question: {interaction.get('question', '?')}")
+                opts = interaction.get("options")
+                if opts:
+                    for i, opt in enumerate(opts, 1):
+                        print(f"   {i}. {opt}")
+            elif kind == "collect":
+                print("\n⏸️  HITL — Input Required:")
+                for field in interaction.get("fields", []):
+                    print(f"   - {field['name']}: {field.get('description', '')}")
+
+        elif etype == "interaction_response":
+            resp = ev.get("response", {})
+            kind = resp.get("kind", "?")
+            if kind == "approve":
+                status = "APPROVED" if resp.get("approved") else "DENIED"
+                print(f"\n▶️  HITL Response: {status}")
+            elif kind == "clarify":
+                print(f"\n▶️  HITL Response: {resp.get('answer', '?')}")
+            elif kind == "collect":
+                print(f"\n▶️  HITL Response: {resp.get('values', {})}")
+
         elif etype == "error":
             print(f"\n❌ Error [{ev.get('code')}]: {ev.get('message')}")
 
@@ -357,11 +489,12 @@ def print_events(events: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 async def run_demo() -> None:
-    """Run two demo questions through the risk agent."""
+    """Run three demo questions through the risk agent."""
     seed_database()
 
     print("\n" + "=" * 60)
     print("  Deep Agent — Risk Desk Agent Demo")
+    print("  (includes Human-in-the-Loop scenario)")
     print("=" * 60)
 
     # Question 1: Show positions
@@ -375,7 +508,17 @@ async def run_demo() -> None:
     print("\n\n" + "-" * 60)
     print("👤 User: What's the 1-day 95% VaR for portfolio EQ-MACRO-1?")
     print("-" * 60)
-    events = await ask_agent("What's the 1-day 95% VaR for portfolio EQ-MACRO-1?")
+    events = await ask_agent(
+        "What's the 1-day 95% VaR for portfolio EQ-MACRO-1?"
+    )
+    print_events(events)
+
+    # Question 3: HITL — Hedge with approval gate + clarification
+    print("\n\n" + "-" * 60)
+    print("👤 User: VaR is too high — hedge the NVDA exposure")
+    print("-" * 60)
+    print("  (This triggers Human-in-the-Loop: approval + clarification)")
+    events = await ask_agent("VaR is too high — hedge the NVDA exposure")
     print_events(events)
 
     print("\n" + "=" * 60)
@@ -386,7 +529,9 @@ async def run_demo() -> None:
     print("  python scripts/run_dev.py")
     print()
     print("Then connect via WebSocket:")
-    print("  wscat -c 'ws://localhost:8000/ws/chat?tenant_id=risk&agent_id=risk-desk-agent'")
+    url = "ws://localhost:8000/ws/chat"
+    params = "?tenant_id=risk&agent_id=risk-desk-agent"
+    print(f"  wscat -c '{url}{params}'")
     print()
 
 
@@ -447,6 +592,32 @@ async def test_event_ordering():
     tr_idx = types.index("tool_result")
     ac_idx = types.index("agent_complete")
     assert tc_idx < tr_idx < ac_idx, f"Wrong order: {types}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_hitl_hedge_approval_and_clarification():
+    """HITL hedge scenario emits approval gate, clarification, then executes."""
+    events = await ask_agent("VaR is too high — hedge the NVDA exposure")
+    types = [e["type"] for e in events]
+
+    # Should contain HITL events before the tool execution
+    assert "interaction_required" in types, f"Missing HITL event: {types}"
+    assert "interaction_response" in types, f"Missing HITL response: {types}"
+    assert "tool_call" in types
+    assert "tool_result" in types
+    assert "agent_complete" in types
+
+    # Verify approval gate came first
+    hitl_events = [e for e in events if e["type"] == "interaction_required"]
+    assert len(hitl_events) == 2, f"Expected 2 HITL events, got {len(hitl_events)}"
+    assert hitl_events[0]["interaction"]["kind"] == "approve"
+    assert hitl_events[1]["interaction"]["kind"] == "clarify"
+
+    # Verify hedge execution happened
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "NVDA" in result["output"]
+    assert "EXECUTED" in result["output"]
 
 
 # ---------------------------------------------------------------------------
