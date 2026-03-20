@@ -81,8 +81,10 @@ def create_app(
         return {"status": "ok"}
 
     # Register WebSocket route
+    from deep_agent.api.runs import router as runs_router
     from deep_agent.api.ws_chat import router as ws_router
 
+    app.include_router(runs_router)
     app.include_router(ws_router)
 
     return app

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -14,7 +16,7 @@ from deep_agent.api.config_loader import build_tenant_context, load_agent_bindin
 from deep_agent.api.schemas import SessionStartedMessage, UserMessage
 from deep_agent.api.session import SessionManager
 from deep_agent.models.context import TenantContext
-from deep_agent.models.events import ErrorEvent
+from deep_agent.models.events import AgentEvent, ErrorEvent
 from deep_agent.models.skills import AgentSkillBindings
 from deep_agent.orchestrator.agent_orchestrator import AgentOrchestrator
 from deep_agent.skills.engine import SkillEngine
@@ -62,6 +64,11 @@ async def ws_chat(
     # Send session_started
     started = SessionStartedMessage(session_id=session.session_id)
     await websocket.send_text(started.model_dump_json())
+    resume_task: asyncio.Task[None] | None = None
+
+    def _set_resume_task(task: asyncio.Task[None] | None) -> None:
+        nonlocal resume_task
+        resume_task = task
 
     try:
         while True:
@@ -72,6 +79,13 @@ async def ws_chat(
                 orchestrator=orchestrator,
                 session_manager=session_manager,
                 session_id=session.session_id,
+                ensure_resume_task=lambda: _ensure_resume_task(
+                    websocket=websocket,
+                    session_manager=session_manager,
+                    session_id=session.session_id,
+                    existing_task=resume_task,
+                ),
+                set_resume_task=_set_resume_task,
             )
     except WebSocketDisconnect:
         logger.debug("Client disconnected (session %s)", session.session_id)
@@ -83,6 +97,8 @@ async def ws_chat(
         except Exception:
             pass
     finally:
+        if resume_task is not None and not resume_task.done():
+            resume_task.cancel()
         session_manager.delete(session.session_id)
 
 
@@ -92,6 +108,8 @@ async def _handle_client_message(
     orchestrator: AgentOrchestrator,
     session_manager: SessionManager,
     session_id: str,
+    ensure_resume_task: Callable[[], asyncio.Task[None]] | None = None,
+    set_resume_task: Callable[[asyncio.Task[None] | None], None] | None = None,
 ) -> None:
     """Parse and process a single client message."""
     # Parse JSON
@@ -127,6 +145,13 @@ async def _handle_client_message(
         )
         await websocket.send_text(error.model_dump_json())
         return
+    if session.active_run_id is not None:
+        error = ErrorEvent(
+            code="WAITING_FOR_INTERACTION",
+            message="Waiting for your response to pending interaction",
+        )
+        await websocket.send_text(error.model_dump_json())
+        return
 
     # Add user message to history
     session.messages.append(HumanMessage(content=user_msg.content))
@@ -138,8 +163,13 @@ async def _handle_client_message(
         context=session.tenant,
         skill_bindings=session.bindings,
         history=session.messages[:-1] if len(session.messages) > 1 else None,
+        session_id=session.session_id,
     ):
         await websocket.send_text(event.model_dump_json())
+        if event.type == "interaction_required":
+            session.active_run_id = event.run_id
+            if ensure_resume_task is not None and set_resume_task is not None:
+                set_resume_task(ensure_resume_task())
         # Capture AI content for history
         if event.type == "agent_chunk":
             summary_parts.append(event.content)
@@ -147,6 +177,35 @@ async def _handle_client_message(
     # Add AI response to history
     if summary_parts:
         session.messages.append(AIMessage(content="".join(summary_parts)))
+
+
+def _ensure_resume_task(
+    websocket: WebSocket,
+    session_manager: SessionManager,
+    session_id: str,
+    existing_task: asyncio.Task[None] | None,
+) -> asyncio.Task[None]:
+    if existing_task is not None and not existing_task.done():
+        return existing_task
+    return asyncio.create_task(_forward_resume_events(websocket, session_manager, session_id))
+
+
+async def _forward_resume_events(
+    websocket: WebSocket,
+    session_manager: SessionManager,
+    session_id: str,
+) -> None:
+    while True:
+        session = session_manager.get(session_id)
+        if session is None:
+            return
+        event: AgentEvent = await session.resume_queue.get()
+        await websocket.send_text(event.model_dump_json())
+        if event.type == "interaction_required":
+            session.active_run_id = event.run_id
+        elif event.type in {"agent_complete", "error"}:
+            session.active_run_id = None
+            return
 
 
 def _resolve_bindings(

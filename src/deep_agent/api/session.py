@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import uuid
@@ -20,6 +21,8 @@ class Session:
     tenant: TenantContext
     bindings: AgentSkillBindings
     messages: list[Any] = field(default_factory=list)  # list[BaseMessage]
+    active_run_id: str | None = None
+    resume_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     created_at: float = field(default_factory=time.time)
 
 

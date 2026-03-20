@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from deep_agent.models.hitl import InteractionResponse
+
 
 class UserMessage(BaseModel):
     """Client → Server: user sends a chat message."""
@@ -20,3 +22,16 @@ class SessionStartedMessage(BaseModel):
 
     type: Literal["session_started"] = "session_started"
     session_id: str
+
+
+class RunRespondRequest(BaseModel):
+    """REST payload for submitting human response to a suspended run."""
+
+    response: InteractionResponse
+
+
+class RunRespondResult(BaseModel):
+    """REST response for accepted run resume request."""
+
+    run_id: str
+    status: str

@@ -71,6 +71,7 @@ class AgentOrchestrator:
         context: TenantContext,
         skill_bindings: AgentSkillBindings,
         history: list[Any] | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message and stream normalized runtime events."""
         _temp_mcp: MCPManager | None = None
@@ -82,8 +83,8 @@ class AgentOrchestrator:
                     skill_bindings.agent_id,
                 )
 
-            session_id = f"{context.tenant_id}:{context.user_id}"
-            run = self._run_state_manager.create_run(session_id=session_id)
+            effective_session_id = session_id or f"{context.tenant_id}:{context.user_id}"
+            run = self._run_state_manager.create_run(session_id=effective_session_id)
             run_id = run.run_id
 
             all_skills = self._skill_engine.discover(skill_bindings)
@@ -148,7 +149,7 @@ class AgentOrchestrator:
                     tool_call_id = event.tool_call_id
                     checkpoint = Checkpoint(
                         run_id=run_id,
-                        session_id=session_id,
+                        session_id=effective_session_id,
                         conversation_history=self._serialize_history(history, message),
                         pending_interaction=interaction,
                         skill_id=(active_skills[0].skill_id if active_skills else None),
@@ -464,6 +465,16 @@ class AgentOrchestrator:
         messages: list[Any] = list(history or [])
         messages.append(HumanMessage(content=message))
         return messages_to_dict(messages)
+
+    @property
+    def run_state_manager(self) -> RunStateManager:
+        """Expose run-state manager for API handlers."""
+        return self._run_state_manager
+
+    @property
+    def checkpoint_store(self) -> CheckpointStore:
+        """Expose checkpoint store for API handlers."""
+        return self._checkpoint_store
 
 
 def _filter_tools(tools: list[BaseTool], allowed_tools: list[str]) -> list[BaseTool]:
