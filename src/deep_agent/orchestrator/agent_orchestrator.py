@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage, messages_from_dict, messages_to_dict
 from langchain_core.tools import BaseTool
 
+from deep_agent.hitl.audit import HITLAuditEvent, emit_hitl_audit
 from deep_agent.hitl.checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from deep_agent.hitl.run_state import InvalidStateTransition, RunStateManager
 from deep_agent.mcp.config import MCPConfig, merge_mcp_configs
@@ -147,14 +149,18 @@ class AgentOrchestrator:
                 ):
                     interaction = HumanInteractionRequest.model_validate(event.input)
                     tool_call_id = event.tool_call_id
+                    interaction_skill_id = _select_interaction_skill_id(
+                        active_skills, matched_skills
+                    )
                     checkpoint = Checkpoint(
                         run_id=run_id,
                         session_id=effective_session_id,
                         conversation_history=self._serialize_history(history, message),
                         pending_interaction=interaction,
-                        skill_id=(active_skills[0].skill_id if active_skills else None),
+                        skill_id=interaction_skill_id,
                         tool_call_id=tool_call_id,
                         created_at=time.time(),
+                        active_skill_ids=[skill.skill_id for skill in active_skills],
                         tenant_context={
                             "tenant_id": context.tenant_id,
                             "user_id": context.user_id,
@@ -169,9 +175,24 @@ class AgentOrchestrator:
                     )
                     await self._checkpoint_store.save(checkpoint)
                     self._run_state_manager.suspend(run_id, interaction)
+                    emit_hitl_audit(
+                        HITLAuditEvent(
+                            timestamp=datetime.now(UTC).isoformat(),
+                            trace_id=run_id,
+                            session_id=effective_session_id,
+                            user_id=context.user_id,
+                            tenant_id=context.tenant_id,
+                            action="interaction_requested",
+                            interaction_kind=interaction.kind,
+                            question_or_action=interaction.question
+                            or interaction.action_description
+                            or "collect_fields",
+                            risk_level=interaction.risk_level,
+                        )
+                    )
                     yield InteractionRequiredEvent(
                         run_id=run_id,
-                        skill_id=(active_skills[0].skill_id if active_skills else None),
+                        skill_id=interaction_skill_id,
                         interaction=interaction,
                     )
                     return
@@ -209,15 +230,51 @@ class AgentOrchestrator:
         if run_info is None:
             yield ErrorEvent(code="HITL_UNKNOWN_RUN", message="Unknown run_id")
             return
-        if run_info.state.value != "suspended":
+        if run_info.state.value == "timed_out":
+            try:
+                self._run_state_manager.apply_fallback(run_id)
+            except InvalidStateTransition as exc:
+                yield ErrorEvent(code="HITL_INVALID_STATE", message=str(exc))
+                return
+            run_info = self._run_state_manager.get_run(run_id)
+            if run_info is None:
+                yield ErrorEvent(code="HITL_UNKNOWN_RUN", message="Unknown run_id")
+                return
+        if run_info.state.value != "suspended" and run_info.state.value != "running":
             yield ErrorEvent(code="HITL_NOT_SUSPENDED", message="Run is not suspended")
             return
 
-        try:
-            self._run_state_manager.resume(run_id, response)
-        except InvalidStateTransition as exc:
-            yield ErrorEvent(code="HITL_INVALID_STATE", message=str(exc))
-            return
+        if run_info.state.value == "suspended":
+            try:
+                self._run_state_manager.resume(run_id, response)
+            except InvalidStateTransition as exc:
+                yield ErrorEvent(code="HITL_INVALID_STATE", message=str(exc))
+                return
+        post_resume = self._run_state_manager.get_run(run_id)
+        if post_resume is not None:
+            latency_ms = None
+            if post_resume.suspended_at is not None and post_resume.responded_at is not None:
+                latency_ms = int((post_resume.responded_at - post_resume.suspended_at) * 1000)
+            checkpoint_context = checkpoint.tenant_context
+            emit_hitl_audit(
+                HITLAuditEvent(
+                    timestamp=datetime.now(UTC).isoformat(),
+                    trace_id=run_id,
+                    session_id=post_resume.session_id,
+                    user_id=str(checkpoint_context.get("user_id", "")),
+                    tenant_id=str(checkpoint_context.get("tenant_id", "")),
+                    action="response_submitted",
+                    interaction_kind=response.kind,
+                    question_or_action=checkpoint.pending_interaction.question
+                    or checkpoint.pending_interaction.action_description
+                    or "collect_fields",
+                    response=response.model_dump_json(),
+                    responder_id=str(checkpoint_context.get("user_id", "")),
+                    latency_ms=latency_ms,
+                    risk_level=checkpoint.pending_interaction.risk_level,
+                    outcome=_response_outcome(response),
+                )
+            )
 
         try:
             context_data = checkpoint.tenant_context
@@ -291,15 +348,33 @@ class AgentOrchestrator:
                         update={
                             "conversation_history": messages_to_dict(history),
                             "pending_interaction": interaction,
+                            "skill_id": _select_interaction_skill_id(active_skills, matched_skills),
                             "tool_call_id": event.tool_call_id,
                             "created_at": time.time(),
+                            "active_skill_ids": [skill.skill_id for skill in active_skills],
                         }
                     )
                     await self._checkpoint_store.save(updated)
                     self._run_state_manager.suspend(run_id, interaction)
+                    checkpoint_context = checkpoint.tenant_context
+                    emit_hitl_audit(
+                        HITLAuditEvent(
+                            timestamp=datetime.now(UTC).isoformat(),
+                            trace_id=run_id,
+                            session_id=checkpoint.session_id,
+                            user_id=str(checkpoint_context.get("user_id", "")),
+                            tenant_id=str(checkpoint_context.get("tenant_id", "")),
+                            action="interaction_requested",
+                            interaction_kind=interaction.kind,
+                            question_or_action=interaction.question
+                            or interaction.action_description
+                            or "collect_fields",
+                            risk_level=interaction.risk_level,
+                        )
+                    )
                     yield InteractionRequiredEvent(
                         run_id=run_id,
-                        skill_id=(active_skills[0].skill_id if active_skills else None),
+                        skill_id=_select_interaction_skill_id(active_skills, matched_skills),
                         interaction=interaction,
                     )
                     return
@@ -617,3 +692,23 @@ def _log_script_filename_collisions(active_skills: list[SkillContent]) -> None:
                 filename,
                 skill_ids,
             )
+
+
+def _select_interaction_skill_id(
+    active_skills: list[SkillContent], matched_skills: list[SkillSummary]
+) -> str | None:
+    """Choose skill attribution for HITL interaction events."""
+    by_id = {skill.skill_id: skill for skill in active_skills}
+    for matched in matched_skills:
+        skill = by_id.get(matched.skill_id)
+        if skill is not None and skill.requires_approval:
+            return skill.skill_id
+    if active_skills:
+        return active_skills[0].skill_id
+    return None
+
+
+def _response_outcome(response: InteractionResponse) -> str:
+    if response.kind == "approve":
+        return "approved" if response.approved else "denied"
+    return "submitted"
