@@ -45,10 +45,12 @@ from deep_agent.models.events import (
     AgentChunkEvent,
     AgentCompleteEvent,
     ErrorEvent,
+    InteractionRequiredEvent,
     SkillMatchEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from deep_agent.models.hitl import InteractionResponse
 from deep_agent.orchestrator.agent_orchestrator import AgentOrchestrator
 from deep_agent.runtime.langgraph_adapter import LangGraphAdapter
 from deep_agent.runtime.llm_router import LLMRouter
@@ -89,7 +91,7 @@ AGENT_CONFIGS: dict[str, AgentSkillBindings] = {
 # Main
 # ---------------------------------------------------------------------------
 
-async def run(prompt: str, agent_id: str, stream: bool) -> None:
+async def run(prompt: str, agent_id: str, stream: bool, interactive: bool) -> None:
     """Wire up the full stack and invoke the agent with a single prompt."""
     settings = get_settings()
 
@@ -137,40 +139,128 @@ async def run(prompt: str, agent_id: str, stream: bool) -> None:
     print(f"{'='*60}\n")
 
     # 8. Stream events from the orchestrator
-    async for event in orchestrator.handle_message(
+    current_stream = orchestrator.handle_message(
         message=prompt,
         context=context,
         skill_bindings=bindings,
-    ):
-        if isinstance(event, SkillMatchEvent):
-            print(f"[skill matched] {event.skill_id} (score: {event.confidence:.2f})")
+    )
+    while True:
+        interaction_pending = False
+        async for event in current_stream:
+            if isinstance(event, InteractionRequiredEvent):
+                interaction_pending = True
+                if not interactive:
+                    print(event.model_dump_json())
+                    return
+                response = await _prompt_interaction_response(event)
+                if response is None:
+                    print("[hitl] Timed out waiting for user input; exiting.")
+                    return
+                current_stream = orchestrator.resume_run(event.run_id, response)
+                break
+            _print_event(event, stream=stream)
 
-        elif isinstance(event, ToolCallEvent):
-            args_preview = str(event.input)[:120]
-            truncated = "..." if len(str(event.input)) > 120 else ""
-            print(f"\n[tool call] {event.tool}({args_preview}{truncated})")
+        if not interaction_pending:
+            break
 
-        elif isinstance(event, ToolResultEvent):
-            output_preview = event.output[:300]
-            print(f"[tool result] {output_preview}{'...' if len(event.output) > 300 else ''}")
-            if event.files:
-                print(f"[output files] {list(event.files.keys())}")
 
-        elif isinstance(event, AgentChunkEvent):
-            if stream:
-                print(event.content, end="", flush=True)
+def _print_event(event: object, stream: bool) -> None:
+    if isinstance(event, SkillMatchEvent):
+        print(f"[skill matched] {event.skill_id} (score: {event.confidence:.2f})")
 
-        elif isinstance(event, AgentCompleteEvent):
-            if not stream:
-                # Print full answer when streaming is off
-                print(event.summary)
-            else:
-                print()  # newline after streamed chunks
-            print(f"\n[done] tokens used: {event.tokens_used}")
+    elif isinstance(event, ToolCallEvent):
+        args_preview = str(event.input)[:120]
+        truncated = "..." if len(str(event.input)) > 120 else ""
+        print(f"\n[tool call] {event.tool}({args_preview}{truncated})")
 
-        elif isinstance(event, ErrorEvent):
-            print(f"\n[error] {event.code}: {event.message}", file=sys.stderr)
-            sys.exit(1)
+    elif isinstance(event, ToolResultEvent):
+        output_preview = event.output[:300]
+        print(f"[tool result] {output_preview}{'...' if len(event.output) > 300 else ''}")
+        if event.files:
+            print(f"[output files] {list(event.files.keys())}")
+
+    elif isinstance(event, AgentChunkEvent):
+        if stream:
+            print(event.content, end="", flush=True)
+
+    elif isinstance(event, AgentCompleteEvent):
+        if not stream:
+            print(event.summary)
+        else:
+            print()
+        print(f"\n[done] tokens used: {event.tokens_used}")
+
+    elif isinstance(event, ErrorEvent):
+        print(f"\n[error] {event.code}: {event.message}", file=sys.stderr)
+        sys.exit(1)
+
+
+async def _prompt_interaction_response(event: InteractionRequiredEvent) -> InteractionResponse | None:
+    interaction = event.interaction
+    timeout = max(interaction.timeout_seconds, 1)
+    try:
+        if interaction.kind == "clarify":
+            print(f"\n❓ {interaction.question or 'Please clarify'}")
+            if interaction.options:
+                for idx, option in enumerate(interaction.options, start=1):
+                    print(f"  {idx}. {option}")
+            value = await _read_line_with_timeout("Your answer: ", timeout=timeout)
+            if value is None:
+                return _fallback_response(interaction.fallback, interaction.kind)
+            return InteractionResponse(kind="clarify", value=value)
+
+        if interaction.kind == "approve":
+            print(f"\n⚠️ Action: {interaction.action_description or 'Approval required'}")
+            print(f"Risk level: {interaction.risk_level or 'unknown'}")
+            answer = await _read_line_with_timeout("Approve? (y/n): ", timeout=timeout)
+            if answer is None:
+                return _fallback_response(interaction.fallback, interaction.kind)
+            approved = answer.strip().lower() in {"y", "yes"}
+            return InteractionResponse(kind="approve", approved=approved, reason="")
+
+        values: dict[str, object] = {}
+        for field in interaction.fields or []:
+            prompt = f"{field.name} ({field.description}): " if field.description else f"{field.name}: "
+            value = await _read_line_with_timeout(prompt, timeout=timeout)
+            if value is None:
+                return _fallback_response(interaction.fallback, interaction.kind, fields=interaction.fields)
+            values[field.name] = value
+        return InteractionResponse(kind="collect", values=values)
+    except KeyboardInterrupt:
+        return None
+
+
+async def _read_line_with_timeout(prompt: str, timeout: int) -> str | None:
+    loop = asyncio.get_running_loop()
+    print(prompt, end="", flush=True)
+    try:
+        value = await asyncio.wait_for(loop.run_in_executor(None, sys.stdin.readline), timeout=timeout)
+    except TimeoutError:
+        print("\n[hitl] input timed out")
+        return None
+    return value.rstrip("\n")
+
+
+def _fallback_response(
+    fallback: str,
+    kind: str,
+    fields: list[object] | None = None,
+) -> InteractionResponse | None:
+    print(f"[hitl] Applying fallback strategy: {fallback}")
+    if fallback == "abort":
+        return None
+    if kind == "clarify":
+        value = "[skipped]" if fallback == "skip" else ""
+        return InteractionResponse(kind="clarify", value=value)
+    if kind == "approve":
+        reason = "[skipped]" if fallback == "skip" else ""
+        return InteractionResponse(kind="approve", approved=False, reason=reason)
+    values: dict[str, str] = {}
+    for field in fields or []:
+        name = getattr(field, "name", "")
+        default = getattr(field, "default", None)
+        values[name] = "[skipped]" if fallback == "skip" else (default or "")
+    return InteractionResponse(kind="collect", values=values)
 
 
 def main() -> None:
@@ -192,9 +282,22 @@ def main() -> None:
         default=True,
         help="Disable streaming — print final answer only",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        default=False,
+        help="Enable interactive HITL prompts for interaction_required events",
+    )
     args = parser.parse_args()
 
-    asyncio.run(run(prompt=args.prompt, agent_id=args.agent, stream=args.stream))
+    asyncio.run(
+        run(
+            prompt=args.prompt,
+            agent_id=args.agent,
+            stream=args.stream,
+            interactive=args.interactive,
+        )
+    )
 
 
 if __name__ == "__main__":

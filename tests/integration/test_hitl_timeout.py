@@ -119,6 +119,89 @@ async def test_timeout_manager_skip_path_resumes_with_skipped_response() -> None
 
 
 @pytest.mark.asyncio
+async def test_timeout_manager_default_path_uses_field_defaults() -> None:
+    run_state = RunStateManager()
+    checkpoints = InMemoryCheckpointStore()
+    orchestrator = _MockOrchestrator()
+    manager = TimeoutManager(
+        run_state_manager=run_state,
+        checkpoint_store=checkpoints,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        check_interval=0.1,
+    )
+
+    run = run_state.create_run(session_id="session-3", skill_id="risk/portfolio-var")
+    interaction = HumanInteractionRequest(
+        kind="collect",
+        fields=[
+            FieldSpec(name="ticker", type="string", default="NVDA"),
+            FieldSpec(name="qty", type="number"),
+        ],
+        timeout_seconds=1,
+        fallback="default",
+    )
+    run_state.suspend(run.run_id, interaction)
+    run.suspended_at = time.time() - 2.0
+    await checkpoints.save(
+        Checkpoint(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            conversation_history=[],
+            pending_interaction=interaction,
+            skill_id="risk/portfolio-var",
+            created_at=time.time(),
+        )
+    )
+
+    await manager._check_timeouts()
+
+    assert orchestrator.resume_calls
+    _, response = orchestrator.resume_calls[0]
+    assert response.kind == "collect"
+    assert response.values == {"ticker": "NVDA", "qty": ""}
+
+
+@pytest.mark.asyncio
+async def test_timeout_manager_does_not_touch_non_expired_runs() -> None:
+    run_state = RunStateManager()
+    checkpoints = InMemoryCheckpointStore()
+    orchestrator = _MockOrchestrator()
+    manager = TimeoutManager(
+        run_state_manager=run_state,
+        checkpoint_store=checkpoints,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        check_interval=0.1,
+    )
+
+    run = run_state.create_run(session_id="session-4", skill_id="risk/portfolio-var")
+    interaction = HumanInteractionRequest(
+        kind="clarify",
+        question="Which portfolio?",
+        timeout_seconds=60,
+        fallback="abort",
+    )
+    run_state.suspend(run.run_id, interaction)
+    run.suspended_at = time.time()
+    await checkpoints.save(
+        Checkpoint(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            conversation_history=[],
+            pending_interaction=interaction,
+            skill_id="risk/portfolio-var",
+            created_at=time.time(),
+        )
+    )
+
+    await manager._check_timeouts()
+
+    assert not orchestrator.resume_calls
+    updated = run_state.get_run(run.run_id)
+    assert updated is not None
+    assert updated.state.value == "suspended"
+
+
+@pytest.mark.asyncio
 async def test_timeout_manager_start_stop_cleanly() -> None:
     run_state = RunStateManager()
     checkpoints = InMemoryCheckpointStore()

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from deep_agent.hitl.checkpoint import Checkpoint, InMemoryCheckpointStore
 from deep_agent.hitl.run_state import RunStateManager
 from deep_agent.models import (
     AgentCompleteEvent,
@@ -271,6 +273,88 @@ async def test_hitl_orchestrator_resume_unknown_run_id_yields_error() -> None:
 
     assert len(events) == 1
     assert isinstance(events[0], ErrorEvent)
+
+
+@pytest.mark.asyncio
+async def test_hitl_orchestrator_resume_non_suspended_run_yields_error() -> None:
+    runtime = MockRuntime(stream_sequences=[])
+    manager = RunStateManager()
+    checkpoints = InMemoryCheckpointStore()
+    run = manager.create_run(session_id="session-1")
+    manager.complete(run.run_id)
+    await checkpoints.save(
+        Checkpoint(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            conversation_history=[],
+            pending_interaction={"kind": "clarify", "question": "Which?"},
+            created_at=time.time(),
+        )
+    )
+    orchestrator = AgentOrchestrator(
+        skill_engine=_mock_skill_engine(),
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+        run_state_manager=manager,
+        checkpoint_store=checkpoints,
+    )
+
+    events = [
+        event
+        async for event in orchestrator.resume_run(
+            run.run_id,
+            InteractionResponse(kind="clarify", value="EQ-MACRO-1"),
+        )
+    ]
+
+    assert len(events) == 1
+    assert isinstance(events[0], ErrorEvent)
+    assert events[0].code == "HITL_NOT_SUSPENDED"
+
+
+@pytest.mark.asyncio
+async def test_hitl_orchestrator_deletes_checkpoint_after_completion(tenant_equities: Any) -> None:
+    runtime = MockRuntime(
+        stream_sequences=[
+            [
+                ToolCallEvent(
+                    tool="human_interaction",
+                    input={"kind": "clarify", "question": "Which portfolio?"},
+                    tool_call_id="tc-1",
+                )
+            ],
+            [AgentCompleteEvent(summary="resumed complete", tokens_used=1)],
+        ]
+    )
+    manager = RunStateManager()
+    orchestrator = AgentOrchestrator(
+        skill_engine=_mock_skill_engine(),
+        llm_router=MagicMock(resolve=MagicMock(return_value=LLMConfig())),
+        runtime=runtime,
+        sandbox=AsyncMock(),
+        run_state_manager=manager,
+    )
+
+    events = [
+        event
+        async for event in orchestrator.handle_message(
+            "need clarification",
+            tenant_equities,
+            skill_bindings=_bindings(),
+        )
+    ]
+    interaction = next(event for event in events if event.type == "interaction_required")
+    assert await orchestrator.checkpoint_store.load(interaction.run_id) is not None
+
+    _ = [
+        event
+        async for event in orchestrator.resume_run(
+            interaction.run_id,
+            InteractionResponse(kind="clarify", value="EQ-MACRO-1"),
+        )
+    ]
+    assert await orchestrator.checkpoint_store.load(interaction.run_id) is None
 
 
 @pytest.mark.asyncio

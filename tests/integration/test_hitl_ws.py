@@ -54,15 +54,34 @@ class _AsyncFakeWebSocket:
         await self._incoming.put(WebSocketDisconnect())
 
 
+def _write_test_skill(skills_root: Path) -> None:
+    skill_dir = skills_root / "risk" / "hitl-bridge"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: hitl-bridge
+description: HITL bridge test skill
+version: "1.0.0"
+tags: [need, clarification]
+allowed-tools: [execute_code]
+---
+Test body
+""",
+        encoding="utf-8",
+    )
+
+
 def _build_app(tmp_path: Path):
     settings = AppSettings(
         OPENAI_API_KEY="sk-fake",  # type: ignore[arg-type]
         SKILLS_ROOT=tmp_path / "skills",
     )
     settings.skills_root.mkdir(parents=True, exist_ok=True)
+    _write_test_skill(settings.skills_root)
     runtime = MockRuntime(
         stream_sequences=[
             [
+                AgentChunkEvent(content="Working on it"),
                 ToolCallEvent(
                     tool="human_interaction",
                     input={"kind": "clarify", "question": "Which portfolio?"},
@@ -122,10 +141,25 @@ async def test_hitl_ws_suspend_and_resume_flow(tmp_path: Path) -> None:
         )
         assert result.status == "resumed"
 
-        resumed_chunk = await _wait_for_event(ws.sent_texts, "agent_chunk")
-        assert resumed_chunk["content"] == "Resumed output"
         resumed_complete = await _wait_for_event(ws.sent_texts, "agent_complete")
         assert resumed_complete["summary"] == "Done"
+        parsed_events = [json.loads(item) for item in ws.sent_texts]
+        all_chunks = [event for event in parsed_events if event["type"] == "agent_chunk"]
+        assert len(all_chunks) >= 2
+        assert all_chunks[-1]["content"] == "Resumed output"
+
+        event_types = [json.loads(item)["type"] for item in ws.sent_texts]
+        required_order = [
+            "skill_match",
+            "agent_chunk",
+            "interaction_required",
+            "agent_chunk",
+            "agent_complete",
+        ]
+        start_idx = 0
+        for expected in required_order:
+            found_idx = event_types.index(expected, start_idx)
+            start_idx = found_idx + 1
     finally:
         await ws.disconnect()
         await task
