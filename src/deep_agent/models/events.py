@@ -22,6 +22,7 @@ class ToolCallEvent(BaseModel):
     type: Literal["tool_call"] = "tool_call"
     tool: str
     input: dict[str, object] = Field(default_factory=dict)
+    tool_call_id: str | None = None
 
 
 class ToolResultEvent(BaseModel):

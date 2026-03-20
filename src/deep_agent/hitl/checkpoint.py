@@ -23,6 +23,9 @@ class Checkpoint(BaseModel):
     tool_call_id: str | None = None
     env_snapshot: dict[str, str] = Field(default_factory=dict)
     scripts_dirs: list[str] = Field(default_factory=list)
+    tenant_context: dict[str, Any] = Field(default_factory=dict)
+    skill_bindings: dict[str, Any] = Field(default_factory=dict)
+    original_message: str = ""
     created_at: float
 
     @classmethod

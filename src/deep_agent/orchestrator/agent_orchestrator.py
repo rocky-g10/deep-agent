@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import HumanMessage, ToolMessage, messages_from_dict, messages_to_dict
 from langchain_core.tools import BaseTool
 
+from deep_agent.hitl.checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
+from deep_agent.hitl.run_state import InvalidStateTransition, RunStateManager
 from deep_agent.mcp.config import MCPConfig, merge_mcp_configs
 from deep_agent.mcp.manager import MCPManager
 from deep_agent.models import (
+    AgentCompleteEvent,
     AgentEvent,
     ErrorEvent,
+    HumanInteractionRequest,
+    InteractionRequiredEvent,
+    InteractionResponse,
     SkillContent,
     SkillMatchEvent,
     SkillSummary,
     TenantContext,
+    ToolCallEvent,
 )
 from deep_agent.models.skills import AgentSkillBindings, MCPToolBinding, SkillMCPServer
 from deep_agent.runtime.llm_router import LLMRouter
@@ -25,6 +34,7 @@ from deep_agent.runtime.protocol import RuntimeAdapter
 from deep_agent.sandbox.protocol import SandboxManager
 from deep_agent.skills.engine import SkillEngine
 from deep_agent.tools.execute_code import create_execute_code_tool
+from deep_agent.tools.human_interaction import create_human_interaction_tool
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +52,8 @@ class AgentOrchestrator:
         sandbox: SandboxManager,
         mcp_manager: MCPManager | None = None,
         extra_tools: list[BaseTool] | None = None,
+        run_state_manager: RunStateManager | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ) -> None:
         """Initialize orchestrator with required subsystems."""
         self._skill_engine = skill_engine
@@ -50,6 +62,8 @@ class AgentOrchestrator:
         self._sandbox = sandbox
         self._mcp_manager = mcp_manager
         self._extra_tools = extra_tools or []
+        self._run_state_manager = run_state_manager or RunStateManager()
+        self._checkpoint_store = checkpoint_store or InMemoryCheckpointStore()
 
     async def handle_message(
         self,
@@ -60,12 +74,17 @@ class AgentOrchestrator:
     ) -> AsyncIterator[AgentEvent]:
         """Process a message and stream normalized runtime events."""
         _temp_mcp: MCPManager | None = None
+        run_id: str | None = None
         try:
             if not skill_bindings.bound_skill_ids:
                 logger.warning(
                     "Agent '%s' has no bound skills — no skills will be matched",
                     skill_bindings.agent_id,
                 )
+
+            session_id = f"{context.tenant_id}:{context.user_id}"
+            run = self._run_state_manager.create_run(session_id=session_id)
+            run_id = run.run_id
 
             all_skills = self._skill_engine.discover(skill_bindings)
             matched_skills = self._skill_engine.match(
@@ -102,11 +121,13 @@ class AgentOrchestrator:
             all_tools = builtin_tools + self._extra_tools + mcp_tools
             if allowed_tools is not None:
                 all_tools = _filter_tools(all_tools, allowed_tools)
+            all_tools.append(create_human_interaction_tool())
 
             system_prompt = self._build_system_prompt(
                 context=context,
                 active_skills=active_skills,
                 all_skills=all_skills,
+                has_human_interaction=True,
             )
 
             agent = self._runtime.create_agent(
@@ -118,10 +139,177 @@ class AgentOrchestrator:
             )
 
             async for event in self._runtime.stream(agent, message, context, history=history):
+                if (
+                    isinstance(event, ToolCallEvent)
+                    and event.tool == "human_interaction"
+                    and run_id is not None
+                ):
+                    interaction = HumanInteractionRequest.model_validate(event.input)
+                    tool_call_id = event.tool_call_id
+                    checkpoint = Checkpoint(
+                        run_id=run_id,
+                        session_id=session_id,
+                        conversation_history=self._serialize_history(history, message),
+                        pending_interaction=interaction,
+                        skill_id=(active_skills[0].skill_id if active_skills else None),
+                        tool_call_id=tool_call_id,
+                        created_at=time.time(),
+                        tenant_context={
+                            "tenant_id": context.tenant_id,
+                            "user_id": context.user_id,
+                            "mcp_config_path": context.mcp_config_path,
+                            "resource_env": context.resource_env,
+                        },
+                        skill_bindings={
+                            "agent_id": skill_bindings.agent_id,
+                            "bound_skill_ids": list(skill_bindings.bound_skill_ids),
+                        },
+                        original_message=message,
+                    )
+                    await self._checkpoint_store.save(checkpoint)
+                    self._run_state_manager.suspend(run_id, interaction)
+                    yield InteractionRequiredEvent(
+                        run_id=run_id,
+                        skill_id=(active_skills[0].skill_id if active_skills else None),
+                        interaction=interaction,
+                    )
+                    return
                 yield event
+                if isinstance(event, AgentCompleteEvent) and run_id is not None:
+                    self._run_state_manager.complete(run_id)
+                    break
         except Exception as exc:
             logger.exception("Orchestrator error")
+            if run_id is not None:
+                run_info = self._run_state_manager.get_run(run_id)
+                if run_info is not None and run_info.state.value == "running":
+                    try:
+                        self._run_state_manager.fail(run_id)
+                    except Exception:
+                        logger.debug("Failed to mark run as failed", exc_info=True)
             yield ErrorEvent(code="ORCHESTRATOR_ERROR", message=str(exc))
+        finally:
+            if _temp_mcp is not None:
+                await _temp_mcp.disconnect()
+
+    async def resume_run(
+        self,
+        run_id: str,
+        response: InteractionResponse,
+    ) -> AsyncIterator[AgentEvent]:
+        """Resume a suspended run with a human response payload."""
+        _temp_mcp: MCPManager | None = None
+        checkpoint = await self._checkpoint_store.load(run_id)
+        if checkpoint is None:
+            yield ErrorEvent(code="HITL_UNKNOWN_RUN", message="Unknown or expired run_id")
+            return
+
+        run_info = self._run_state_manager.get_run(run_id)
+        if run_info is None:
+            yield ErrorEvent(code="HITL_UNKNOWN_RUN", message="Unknown run_id")
+            return
+        if run_info.state.value != "suspended":
+            yield ErrorEvent(code="HITL_NOT_SUSPENDED", message="Run is not suspended")
+            return
+
+        try:
+            self._run_state_manager.resume(run_id, response)
+        except InvalidStateTransition as exc:
+            yield ErrorEvent(code="HITL_INVALID_STATE", message=str(exc))
+            return
+
+        try:
+            context_data = checkpoint.tenant_context
+            bindings_data = checkpoint.skill_bindings
+            context = TenantContext(
+                tenant_id=str(context_data.get("tenant_id", "default")),
+                user_id=str(context_data.get("user_id", "anonymous")),
+                mcp_config_path=str(context_data.get("mcp_config_path", "")),
+                resource_env=dict(context_data.get("resource_env", {})),
+            )
+            skill_bindings = AgentSkillBindings(
+                agent_id=str(bindings_data.get("agent_id", "")),
+                bound_skill_ids=tuple(bindings_data.get("bound_skill_ids", [])),
+            )
+
+            all_skills = self._skill_engine.discover(skill_bindings)
+            matched_skills = self._skill_engine.match(
+                checkpoint.original_message,
+                skill_bindings,
+                min_score=_DEFAULT_MULTI_SKILL_MIN_SCORE,
+            )
+            active_skills: list[SkillContent] = []
+            for match in matched_skills:
+                try:
+                    active_skills.append(self._skill_engine.load(match.skill_id, skill_bindings))
+                except Exception as exc:
+                    logger.warning("Failed to load matched skill '%s': %s", match.skill_id, exc)
+
+            merged = _merge_skill_contents(active_skills)
+            scripts_dirs = merged["scripts_dirs"]
+            skill_timeout = merged["skill_timeout"]
+            skill_mcp = merged["mcp_servers"]
+            skill_mcp_bindings = merged["mcp_tool_bindings"]
+            allowed_tools = merged["allowed_tools"]
+
+            llm_config = self._llm_router.resolve(context)
+            builtin_tools = self._build_builtin_tools(
+                context, scripts_dirs=scripts_dirs, timeout=skill_timeout
+            )
+            mcp_tools, _temp_mcp = await self._resolve_mcp_tools(skill_mcp, skill_mcp_bindings)
+            all_tools = builtin_tools + self._extra_tools + mcp_tools
+            if allowed_tools is not None:
+                all_tools = _filter_tools(all_tools, allowed_tools)
+            all_tools.append(create_human_interaction_tool())
+
+            system_prompt = self._build_system_prompt(
+                context=context,
+                active_skills=active_skills,
+                all_skills=all_skills,
+                has_human_interaction=True,
+            )
+            agent = self._runtime.create_agent(
+                model=llm_config.model,
+                tools=all_tools,
+                system_prompt=system_prompt,
+                temperature=llm_config.temperature,
+                max_tokens=llm_config.max_tokens,
+            )
+
+            history = list(messages_from_dict(checkpoint.conversation_history))
+            history.append(
+                ToolMessage(
+                    content=response.model_dump_json(),
+                    tool_call_id=checkpoint.tool_call_id or "human_interaction",
+                )
+            )
+            async for event in self._runtime.stream(agent, "", context, history=history):
+                if isinstance(event, ToolCallEvent) and event.tool == "human_interaction":
+                    interaction = HumanInteractionRequest.model_validate(event.input)
+                    updated = checkpoint.model_copy(
+                        update={
+                            "conversation_history": messages_to_dict(history),
+                            "pending_interaction": interaction,
+                            "tool_call_id": event.tool_call_id,
+                            "created_at": time.time(),
+                        }
+                    )
+                    await self._checkpoint_store.save(updated)
+                    self._run_state_manager.suspend(run_id, interaction)
+                    yield InteractionRequiredEvent(
+                        run_id=run_id,
+                        skill_id=(active_skills[0].skill_id if active_skills else None),
+                        interaction=interaction,
+                    )
+                    return
+                yield event
+                if isinstance(event, AgentCompleteEvent):
+                    self._run_state_manager.complete(run_id)
+                    await self._checkpoint_store.delete(run_id)
+                    break
+        except Exception as exc:
+            logger.exception("Resume run error")
+            yield ErrorEvent(code="HITL_RESUME_ERROR", message=str(exc))
         finally:
             if _temp_mcp is not None:
                 await _temp_mcp.disconnect()
@@ -199,6 +387,7 @@ class AgentOrchestrator:
         context: TenantContext,
         active_skills: list[SkillContent],
         all_skills: list[SkillSummary],
+        has_human_interaction: bool = False,
     ) -> str:
         """Construct a full system prompt with skills, resources, and tool instructions."""
         parts: list[str] = []
@@ -244,7 +433,37 @@ class AgentOrchestrator:
         )
         parts.append("- Save output files (charts, CSVs) to the output/ directory.")
 
+        if has_human_interaction:
+            parts.append("")
+            parts.append("## Human Interaction")
+            parts.append(
+                "You have access to the `human_interaction` tool. Use it when you need "
+                "clarification, approval for a risky action, or structured input from the user."
+            )
+            parts.append('The three interaction kinds are: "clarify", "approve", "collect".')
+            if any(skill.requires_approval for skill in active_skills):
+                parts.append("")
+                parts.append(
+                    'IMPORTANT: You MUST call the `human_interaction` tool with kind="approve" '
+                    "before executing any trade, order, or irreversible action. Present the "
+                    "full action details and risk level."
+                )
+            hint_lines = [
+                hint for skill in active_skills for hint in skill.clarification_hints.values()
+            ]
+            if hint_lines:
+                parts.append("")
+                parts.append("Clarification guidance:")
+                for hint in hint_lines:
+                    parts.append(f"- {hint}")
+
         return "\n".join(parts)
+
+    @staticmethod
+    def _serialize_history(history: list[Any] | None, message: str) -> list[dict[str, Any]]:
+        messages: list[Any] = list(history or [])
+        messages.append(HumanMessage(content=message))
+        return messages_to_dict(messages)
 
 
 def _filter_tools(tools: list[BaseTool], allowed_tools: list[str]) -> list[BaseTool]:

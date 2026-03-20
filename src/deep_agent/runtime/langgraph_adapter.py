@@ -121,7 +121,12 @@ class LangGraphAdapter(RuntimeAdapter):
                     for tool_call in completed_tool_calls:
                         tool_name = str(tool_call.get("name", "unknown"))
                         tool_args = _coerce_tool_args(tool_call.get("args", {}))
-                        yield ToolCallEvent(tool=tool_name, input=tool_args)
+                        tool_id = tool_call.get("id")
+                        yield ToolCallEvent(
+                            tool=tool_name,
+                            input=tool_args,
+                            tool_call_id=str(tool_id) if isinstance(tool_id, str) else None,
+                        )
 
                     for tool_chunk in getattr(message_chunk, "tool_call_chunks", None) or []:
                         chunk_dict = dict(tool_chunk)
