@@ -75,6 +75,17 @@ def test_agent_event_discriminator_deserializes_all_event_types() -> None:
         {"type": "skill_match", "skill_id": "equities/zscore-monitor", "confidence": 0.9},
         {"type": "agent_complete", "summary": "Done", "tokens_used": 42},
         {"type": "error", "code": "SANDBOX_TIMEOUT", "message": "Timed out"},
+        {
+            "type": "interaction_required",
+            "run_id": "run-1",
+            "skill_id": "risk/portfolio-var",
+            "interaction": {"kind": "clarify", "question": "Which portfolio?"},
+        },
+        {
+            "type": "interaction_response",
+            "run_id": "run-1",
+            "response": {"kind": "clarify", "value": "EQ-MACRO-1"},
+        },
     ]
 
     event_types = [adapter.validate_python(payload).type for payload in payloads]
@@ -85,6 +96,8 @@ def test_agent_event_discriminator_deserializes_all_event_types() -> None:
         "skill_match",
         "agent_complete",
         "error",
+        "interaction_required",
+        "interaction_response",
     ]
 
 
@@ -125,8 +138,12 @@ def test_skill_quality_defaults() -> None:
     assert q.timeout == 60
     assert q.max_retries == 0
     assert q.validation == ""
+    assert q.hitl_timeout == 300
+    assert q.hitl_fallback == "abort"
 
 
 def test_skill_quality_alias() -> None:
-    q = SkillQuality(**{"max-retries": 3})
+    q = SkillQuality(**{"max-retries": 3, "hitl-timeout": 900, "hitl-fallback": "skip"})
     assert q.max_retries == 3
+    assert q.hitl_timeout == 900
+    assert q.hitl_fallback == "skip"

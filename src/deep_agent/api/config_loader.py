@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from deep_agent.models.context import TenantContext
 from deep_agent.models.skills import AgentSkillBindings

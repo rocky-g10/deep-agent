@@ -54,7 +54,13 @@ inputs:
 quality:
   timeout: 90
   max-retries: 2
+  hitl-timeout: 600
+  hitl-fallback: default
   validation: "Must include VaR number"
+requires-approval: true
+clarification-hints:
+  missing_portfolio: "Which portfolio should I analyze?"
+  ambiguous_period: "YTD or trailing 12 months?"
 ---
 Body
 """,
@@ -71,7 +77,14 @@ Body
     assert skill.inputs[1].required is False
     assert skill.quality.timeout == 90
     assert skill.quality.max_retries == 2
+    assert skill.quality.hitl_timeout == 600
+    assert skill.quality.hitl_fallback == "default"
     assert skill.quality.validation == "Must include VaR number"
+    assert skill.requires_approval is True
+    assert skill.clarification_hints == {
+        "missing_portfolio": "Which portfolio should I analyze?",
+        "ambiguous_period": "YTD or trailing 12 months?",
+    }
 
 
 def test_quality_timeout_parsed(tmp_path: Path) -> None:
@@ -175,6 +188,69 @@ Body
     assert skill.quality.timeout == 60
     assert skill.quality.max_retries == 0
     assert skill.quality.validation == ""
+    assert skill.quality.hitl_timeout == 300
+    assert skill.quality.hitl_fallback == "abort"
+    assert skill.requires_approval is False
+    assert skill.clarification_hints == {}
+
+
+def test_parse_skill_hitl_frontmatter_fields(tmp_path: Path) -> None:
+    """Parser should map HITL frontmatter fields to SkillContent + SkillQuality."""
+    skill_path = tmp_path / "skills" / "risk" / "hitl-fields" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: hitl-fields
+description: hitl parsing
+version: "1.0.0"
+tags: [risk]
+allowed-tools: [execute_code]
+requires-approval: true
+clarification-hints:
+  missing_book: "Which book should I use?"
+quality:
+  hitl-timeout: 1200
+  hitl-fallback: skip
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert skill.requires_approval is True
+    assert skill.clarification_hints == {"missing_book": "Which book should I use?"}
+    assert skill.quality.hitl_timeout == 1200
+    assert skill.quality.hitl_fallback == "skip"
+
+
+def test_parse_skill_clarification_hints_list_of_dicts(tmp_path: Path) -> None:
+    """Parser should accept clarification-hints as a list of single-entry maps."""
+    skill_path = tmp_path / "skills" / "risk" / "hitl-hints-list" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        """---
+name: hitl-hints-list
+description: hitl list parsing
+version: "1.0.0"
+tags: [risk]
+allowed-tools: [execute_code]
+clarification-hints:
+  - missing_portfolio: "Which portfolio should I analyze?"
+  - ambiguous_period: "YTD or trailing 12 months?"
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_path)
+
+    assert skill.clarification_hints == {
+        "missing_portfolio": "Which portfolio should I analyze?",
+        "ambiguous_period": "YTD or trailing 12 months?",
+    }
 
 
 def test_parse_reference_skills_have_inputs_and_quality() -> None:

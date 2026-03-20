@@ -75,9 +75,16 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
             **{
                 k: v
                 for k, v in raw_quality.items()
-                if k in SkillQuality.model_fields or k in ("max-retries",)
+                if k in SkillQuality.model_fields
+                or k in ("max-retries", "hitl-timeout", "hitl-fallback")
             }
         )
+    requires_approval = bool(metadata.get("requires-approval", False))
+    clarification_hints = _validate_string_map(
+        metadata.get("clarification-hints", {}),
+        field_name="clarification-hints",
+        path=path,
+    )
 
     raw_mcp_servers = metadata.get("mcp-servers", [])
     mcp_servers: list[SkillMCPServer] = []
@@ -120,6 +127,8 @@ def parse_skill_file(path: Path, loader: FrontmatterLoader | None = None) -> Ski
         allowed_tools=allowed_tools,
         body=body,
         scripts_path=scripts_path,
+        requires_approval=requires_approval,
+        clarification_hints=clarification_hints,
         inputs=inputs,
         quality=quality,
         mcp_servers=mcp_servers,
@@ -159,3 +168,29 @@ def _validate_string_list(value: Any, field_name: str, path: Path) -> list[str]:
     if not all(isinstance(item, str) and item.strip() for item in value):
         raise SkillParseError(f"{path}: frontmatter field '{field_name}' must contain strings")
     return [str(item) for item in value]
+
+
+def _validate_string_map(value: Any, field_name: str, path: Path) -> dict[str, str]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, list):
+        flattened: dict[str, str] = {}
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise SkillParseError(
+                    f"{path}: frontmatter field '{field_name}' list entries must be maps"
+                )
+            for k, v in entry.items():
+                flattened[k] = v
+        items = flattened.items()
+    else:
+        raise SkillParseError(
+            f"{path}: frontmatter field '{field_name}' must be a map or list of maps"
+        )
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in items):
+        raise SkillParseError(
+            f"{path}: frontmatter field '{field_name}' must contain string keys and values"
+        )
+    return {k: v for k, v in items}

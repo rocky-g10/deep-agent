@@ -6,9 +6,18 @@ from deep_agent.models.events import (
     AgentCompleteEvent,
     AgentEvent,
     ErrorEvent,
+    InteractionRequiredEvent,
+    InteractionResponseEvent,
     SkillMatchEvent,
     ToolCallEvent,
     ToolResultEvent,
+)
+from deep_agent.models.hitl import (
+    FieldSpec,
+    HumanInteractionRequest,
+    InteractionResponse,
+    RunInfo,
+    RunState,
 )
 from deep_agent.models.llm import LLMConfig
 from deep_agent.models.sandbox import ExecuteResult, ResourceLimits
@@ -29,8 +38,15 @@ __all__ = [
     "AgentSkillBindings",
     "ErrorEvent",
     "ExecuteResult",
+    "FieldSpec",
+    "HumanInteractionRequest",
+    "InteractionRequiredEvent",
+    "InteractionResponse",
+    "InteractionResponseEvent",
     "LLMConfig",
     "ResourceLimits",
+    "RunInfo",
+    "RunState",
     "SkillContent",
     "SkillInput",
     "SkillMCPServer",

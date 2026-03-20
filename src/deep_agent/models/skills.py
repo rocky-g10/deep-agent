@@ -23,6 +23,10 @@ class SkillQuality(BaseModel):
     timeout: int = 60
     max_retries: int = Field(default=0, alias="max-retries")
     validation: str = ""
+    hitl_timeout: int = Field(default=300, alias="hitl-timeout")
+    hitl_fallback: Literal["abort", "default", "skip"] = Field(
+        default="abort", alias="hitl-fallback"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -69,6 +73,8 @@ class SkillContent(SkillMetadata):
 
     body: str
     scripts_path: str = ""
+    requires_approval: bool = False
+    clarification_hints: dict[str, str] = Field(default_factory=dict)
     inputs: list[SkillInput] = Field(default_factory=list)
     quality: SkillQuality = Field(default_factory=SkillQuality)
     mcp_servers: list[SkillMCPServer] = Field(default_factory=list)

@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Discriminator, Field
 
+from deep_agent.models.hitl import HumanInteractionRequest, InteractionResponse
+
 
 class AgentChunkEvent(BaseModel):
     """Streamed text chunk from the running agent."""
@@ -55,12 +57,31 @@ class ErrorEvent(BaseModel):
     message: str
 
 
+class InteractionRequiredEvent(BaseModel):
+    """Event emitted when execution pauses and needs human input."""
+
+    type: Literal["interaction_required"] = "interaction_required"
+    run_id: str
+    skill_id: str | None = None
+    interaction: HumanInteractionRequest
+
+
+class InteractionResponseEvent(BaseModel):
+    """Event carrying a human response that resumes a paused run."""
+
+    type: Literal["interaction_response"] = "interaction_response"
+    run_id: str
+    response: InteractionResponse
+
+
 AgentEvent = Annotated[
     AgentChunkEvent
     | ToolCallEvent
     | ToolResultEvent
     | SkillMatchEvent
     | AgentCompleteEvent
-    | ErrorEvent,
+    | ErrorEvent
+    | InteractionRequiredEvent
+    | InteractionResponseEvent,
     Discriminator("type"),
 ]
